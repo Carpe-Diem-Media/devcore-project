@@ -112,3 +112,9 @@ Render targets must be ignored by Git. The tool writes them with mode `0600`, re
 ## Compatibility
 
 Repository-owned releases preserve existing v1 project files and the existing owner-secret model unless a reviewed versioned contract changes them. The examples in the recovered archive are historical evidence; this document and tests define the current supported baseline.
+
+## Managed slot extension, 1.2.0 source
+
+`SLOT_POOL` is an optional path to the exact NewYou JSON declaration in [managed slots](managed-slots.md). When declared, it routes `run dev` and `run test` through managed allocation and requires prior owner authorization. Managed mode rejects `run all` before acquisition; it never falls back to shared TEST. Projects without the declaration retain all legacy profiles. `plan`, `doctor`, `render`, `activate` and `rotate` retain their legacy meanings; none is a slot activation or generic recovery command. In particular, do not invoke legacy `activate` to repair a missing managed generation.
+
+The extension keeps the canonical secret store, owner declarations and render tokens. Managed runs supply a private per-command shadow TEST binding to the existing renderer and load its temporary outputs without rewriting worktree files. Snapshots are removed immediately after loading. Production is outside this tool's slot contract. See the [NewYou integration contract](newyou-integration-contract.md) for markers, live verification, migration and child-process obligations.

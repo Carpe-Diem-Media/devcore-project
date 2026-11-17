@@ -30,3 +30,9 @@ The current workstation service names, endpoints, PostgreSQL version, persistenc
 The contract has one DEV owner-secret binding and one TEST owner-secret binding. Optional supplemental-secret bindings (see [project contract](project-contract.md)) deliver additional workstation-local secrets without owner provisioning. Supplemental secrets are not generated or rotated by DevCore. Supplemental values are validated in Bash against a portable literal/token alphabet so they remain safe when consumer templates are shell-sourced; secret bytes are never passed through child-process argv during validation.
 
 No application runtime should copy this executable into product code. The executable is a workstation development tool, not a production credential manager.
+
+## Managed slots
+
+The single-file executable embeds a marked Python module for opt-in NewYou leases. Tests load that module without invoking the CLI and inject resource/approval adapters. `Pool` owns atomic registry transitions; `Postgres` owns exact generation provisioning/cleanup through the existing administrative boundary; `SlotContext` reuses the renderer and canonical secret store; `managed_run` supervises Linux descendants through completion.
+
+The installer/rollback artifact remains one checksum-verified executable. No package, daemon, extra service or runtime privilege is added. The [managed-slot contract](managed-slots.md) describes state guards and recovery, and [NewYou integration](newyou-integration-contract.md) keeps application/PLT adoption separate.

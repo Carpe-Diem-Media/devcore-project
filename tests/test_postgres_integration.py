@@ -15,6 +15,47 @@ TOOL = ROOT / "bin" / "devcore-project"
 RUN_INTEGRATION = os.environ.get("DEVCORE_RUN_POSTGRES_INTEGRATION") == "1"
 
 
+class IntegrationFixtureTests(unittest.TestCase):
+    """Exercise fixture boundaries without Docker or workstation resources."""
+    def test_readiness_uses_authenticated_tcp_instead_of_temporary_unix_server(self):
+        from unittest.mock import Mock
+        fixture = PostgresIntegrationTests()
+        fixture.admin_password = "synthetic-admin-password"
+        fixture.containers = []
+        fixture._run = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, "container-id", ""),
+            subprocess.CompletedProcess([], 0, "127.0.0.1:54321\n", ""),
+            subprocess.CompletedProcess([], 0, "1\n", ""),
+        ])
+        self.assertEqual(fixture._start_container("ci-owned"), 54321)
+        probe = fixture._run.call_args_list[-1]
+        arguments = probe.args[0]
+        self.assertIn("-h 127.0.0.1", " ".join(arguments))
+        self.assertNotIn(fixture.admin_password, " ".join(arguments))
+        self.assertEqual(probe.kwargs.get("input_text"), fixture.admin_password + "\n")
+
+    def test_bootstrap_failure_reports_connection_and_container_state_without_secrets(self):
+        from unittest.mock import Mock
+        fixture = PostgresIntegrationTests()
+        fixture.admin_password = "synthetic-admin-password"
+        fixture.dev_password = "synthetic-dev-password"
+        fixture.test_password = "synthetic-test-password"
+        fixture.new_passwords = ["synthetic-new-password"]
+        fixture._docker_psql = Mock(return_value=subprocess.CompletedProcess([], 2, "",
+            "server closed connection " + " ".join([fixture.admin_password, fixture.dev_password,
+                fixture.test_password, *fixture.new_passwords])))
+        fixture._run = Mock(return_value=subprocess.CompletedProcess([], 0, "running|0|false", ""))
+        with self.assertRaises(AssertionError) as failure:
+            fixture._create_admin("ci-owned")
+        message = str(failure.exception)
+        self.assertIn("exit 2", message)
+        self.assertIn("server closed connection", message)
+        self.assertIn("running|0|false", message)
+        for password in (fixture.admin_password, fixture.dev_password, fixture.test_password,
+                         *fixture.new_passwords):
+            self.assertNotIn(password, message)
+
+
 @unittest.skipUnless(
     RUN_INTEGRATION,
     "set DEVCORE_RUN_POSTGRES_INTEGRATION=1 to run disposable PostgreSQL integration checks",
@@ -148,7 +189,13 @@ class PostgresIntegrationTests(unittest.TestCase):
         port = int(port_result.stdout.strip().rsplit(":", 1)[1])
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            ready = self._docker_psql(name, "SELECT 1", check=False)
+            # The image starts a socket-only temporary server during initdb.
+            # Only the final server accepts authenticated TCP connections.
+            ready = self._run(["docker", "exec", "-i", name, "sh", "-c",
+                'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; '
+                'exec psql -X -qAt -w -v ON_ERROR_STOP=1 -h 127.0.0.1 '
+                '-U postgres -d postgres -c "SELECT 1"'],
+                input_text=self.admin_password + "\n", check=False)
             if ready.returncode == 0:
                 return port
             time.sleep(0.5)
@@ -160,14 +207,29 @@ class PostgresIntegrationTests(unittest.TestCase):
             "CREATE ROLE devcore_admin WITH LOGIN SUPERUSER;",
             check=False,
         )
-        self.assertEqual(result.returncode, 0, "could not create isolated DevCore admin role")
+        if result.returncode:
+            state = self._run(["docker", "inspect", "-f",
+                "{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}", container], check=False)
+            self.fail(self._redact(f"isolated DevCore admin bootstrap exit {result.returncode}; "
+                      f"container state {state.stdout.strip()}; {result.stderr.strip()}"))
+
+    def _redact(self, text):
+        for password in (self.admin_password, self.dev_password, self.test_password,
+                         *(getattr(self, "new_passwords", None) or [])):
+            if password:
+                text = text.replace(password, "[REDACTED]")
+        return text
 
     def _docker_psql(self, container, sql, check=True):
-        return self._run(
-            ["docker", "exec", "-i", container, "psql", "-X", "-q", "-v",
+        result = self._run(
+            ["docker", "exec", "-i", container, "psql", "-X", "-qAt", "-v",
              "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres", "-c", sql],
             check=check,
         )
+        if check:
+            self.assertEqual(result.returncode, 0,
+                self._redact(f"CI-owned PostgreSQL SQL exit {result.returncode}: {result.stderr.strip()}"))
+        return result
 
     def _run(self, args, *, env=None, timeout=30, check=True, input_text=None):
         child_env = os.environ.copy()
@@ -300,6 +362,125 @@ class PostgresIntegrationTests(unittest.TestCase):
                 "DROP ROLE IF EXISTS membership_drift;",
                 check=False,
             )
+
+    def test_managed_slot_databases_are_isolated_restricted_and_fresh_on_reuse(self):
+        # Only CI-owned disposable containers reach this injected adapter. The CLI
+        # still requires the exact approved workstation endpoint and owner receipt.
+        from tests.test_slots import module, approve_for_test
+        m = module()
+        container = self.container_names[1]
+        inspected = self._run(["docker", "inspect", "-f", "{{.Id}}", container])
+        self.assertEqual(inspected.returncode, 0, "could not inspect CI-owned TEST container")
+        container_id = inspected.stdout.strip()
+        passwords = {}
+        def password(row):
+            value = secrets.token_hex(32)
+            passwords[row["role"]] = value
+            return value
+        adapter = m.Postgres(m.newyou_contract(), password, endpoint=lambda: container_id)
+        pool = m.Pool(self.root / "slot-pool", m.newyou_contract(), adapter,
+                      port_available=lambda _: True, approval_check=approve_for_test)
+        pool.enable(pool.manifest_digest(), "ci-owned-disposable-targets")
+        # This legacy analogue exists only inside this test's labelled container.
+        # Default PUBLIC CONNECT must block provisioning before any managed role.
+        self._docker_psql(container, "CREATE ROLE new_you_test LOGIN NOCREATEDB;")
+        self._docker_psql(container, "CREATE DATABASE new_you_test OWNER new_you_test;")
+        with self.assertRaisesRegex(m.SlotError, "legacy TEST PUBLIC CONNECT"):
+            pool.acquire(str(self.root))
+        blocked = pool.status()[0]
+        self.assertEqual(blocked["state"], "free")
+        self.assertEqual(passwords, {})
+        self.assertEqual(adapter.executor("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname="
+                         + m.sql_literal(blocked["role"]) + ");"), "f")
+        # Simulate separately authorized hardening on the CI-owned analogue only.
+        # Production code never changes an existing database's privileges.
+        self._docker_psql(container, "REVOKE CONNECT ON DATABASE new_you_test FROM PUBLIC;")
+        self.assertEqual(adapter.executor("SELECT has_database_privilege('new_you_test', "
+                         "'new_you_test', 'CONNECT');"), "t")
+        paths = [self.root / "worktree-a", self.root / "worktree-b"]
+        for path in paths:
+            path.mkdir()
+        import concurrent.futures
+        # Separate adapters avoid sharing the bound-connection attribute between jobs.
+        def claim(path):
+            own = m.Pool(pool.root, m.newyou_contract(),
+                         m.Postgres(m.newyou_contract(), password, endpoint=lambda: container_id),
+                         port_available=lambda _: True)
+            return own.acquire(str(path))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            a, b = list(executor.map(claim, paths))
+        self.assertNotEqual(a["database"], b["database"])
+        def runtime(row, sql, database=None, target_container=None):
+            result = self._run(
+                ["docker", "exec", "-i", target_container or container_id, "sh", "-c",
+                 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$1" -d "$2" -c "$3"',
+                 "slot-runtime", row["role"], database or row["database"], sql],
+                input_text=passwords[row["role"]] + "\n", check=False)
+            self.assertNotIn(passwords[row["role"]], result.stdout + result.stderr,
+                             "runtime client exposed a synthetic credential")
+            return result
+        def value(row, sql):
+            result = runtime(row, sql)
+            self.assertEqual(result.returncode, 0, "slot runtime SQL failed")
+            return result.stdout.strip()
+        for row, marker in ((a, "synthetic-a"), (b, "synthetic-b")):
+            self.assertEqual(value(row, "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname=current_user"), "f")
+            self.assertEqual(value(row, f"CREATE TABLE isolation_probe(marker text); INSERT INTO isolation_probe VALUES ('{marker}'); SELECT marker FROM isolation_probe;"), marker)
+        self.assertEqual(value(a, "SELECT marker FROM isolation_probe"), "synthetic-a")
+        self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")
+        self.assertNotEqual(runtime(a, "SELECT 1", b["database"]).returncode, 0,
+                            "slot A could connect to slot B")
+        self.assertNotEqual(runtime(a, "SELECT 1", "new_you_test").returncode, 0,
+                            "slot A could connect to protected legacy TEST")
+        # DEV is a separate cluster, not another database on the TEST endpoint.
+        # The managed LOGIN must not be created there or authenticate there.
+        dev_inspected = self._run(["docker", "inspect", "-f", "{{.Id}}", self.container_names[0]])
+        self.assertEqual(dev_inspected.returncode, 0, "could not inspect CI-owned DEV container")
+        dev_id = dev_inspected.stdout.strip()
+        self.assertNotEqual(dev_id, container_id)
+        dev_role = self._docker_psql(dev_id, "SELECT EXISTS(SELECT FROM pg_roles WHERE rolname="
+                                    + m.sql_literal(a["role"]) + ");")
+        self.assertEqual(dev_role.stdout.strip(), "f")
+        self.assertNotEqual(runtime(a, "SELECT 1", "postgres", target_container=dev_id).returncode, 0,
+                            "TEST generation credentials authenticated on the DEV cluster")
+        self.assertNotEqual(runtime(a, "CREATE DATABASE forbidden_extra_database").returncode, 0,
+                            "runtime role unexpectedly had CREATEDB")
+        # Migration DDL is allowed, but database ACLs remain administrative.
+        # GRANT without a grant option can warn and return success, so inspect
+        # the effective boundary rather than relying only on its exit status.
+        original_acl = value(a, "SELECT datacl::text FROM pg_database WHERE datname=current_database()")
+        for grantee in ("PUBLIC", b["role"]):
+            runtime(a, f"GRANT CONNECT ON DATABASE {a['database']} TO {grantee}")
+            self.assertEqual(value(a, "SELECT datacl::text FROM pg_database WHERE datname=current_database()"), original_acl,
+                             "runtime role changed database ACL")
+            self.assertNotEqual(runtime(b, "SELECT 1", a["database"]).returncode, 0,
+                                "runtime role delegated access to its slot database")
+        self.assertEqual(value(a, "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()"),
+                         "devcore_admin")
+        self.assertEqual(value(a, "SELECT has_database_privilege(current_user, current_database(), 'CONNECT WITH GRANT OPTION')"), "f")
+        self.assertEqual(value(a, "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"), "f")
+        self.assertEqual(value(a, "SELECT count(*) FROM pg_database WHERE datdba=(SELECT oid FROM pg_roles WHERE rolname=current_user)"), "0")
+        self.assertNotEqual(runtime(a, "SET ROLE devcore_admin").returncode, 0,
+                            "runtime role could assume administrative ownership")
+        self.assertNotEqual(runtime(a, f"ALTER DATABASE {a['database']} OWNER TO {a['role']}").returncode, 0,
+                            "runtime role could take database ownership")
+        self.assertEqual(value(a, "BEGIN; CREATE TABLE migration_probe(id bigint PRIMARY KEY); "
+                              "ALTER TABLE migration_probe ADD COLUMN marker text; "
+                              "CREATE INDEX migration_probe_marker ON migration_probe(marker); "
+                              "CREATE FUNCTION migration_identity(integer) RETURNS integer LANGUAGE SQL "
+                              "AS 'SELECT $1'; CREATE TEMP TABLE temporary_probe(id integer); "
+                              "COMMIT; SELECT migration_identity(7);"), "7")
+        # Independent connections keep committed markers. Cleanup removes only A.
+        pool.release(a["lease_id"], a["generation"], str(paths[0]))
+        self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")
+        fresh = pool.acquire(str(paths[0]))
+        self.assertEqual(fresh["slot"], a["slot"])
+        self.assertNotEqual(fresh["database"], a["database"])
+        self.assertEqual(value(fresh, "SELECT count(*) FROM pg_tables WHERE tablename='isolation_probe'"), "0")
+        self.assertNotEqual(runtime(a, "SELECT 1").returncode, 0,
+                            "old generation could still authenticate")
+        pool.release(fresh["lease_id"], fresh["generation"], str(paths[0]))
+        pool.release(b["lease_id"], b["generation"], str(paths[1]))
 
     def _assert_database_invariants(self, container, role, createdb):
         query = (

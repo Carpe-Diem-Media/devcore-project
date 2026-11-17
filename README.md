@@ -23,6 +23,12 @@ devcore-project run test -- <command>
 
 `activate` checks and provisions configured project database roles/databases, renders ignored environment files, and checks connectivity. It does not start, stop, or recreate shared services. Read the [security model](docs/security-model.md) before using credential-management commands.
 
+## Managed NewYou slots
+
+Unreleased source version 1.2.0 adds opt-in automatic HTTP/TEST leases for NewYou. Existing v1 consumers keep their current behavior. The 20-slot pool uses ports 4221 through 4240 and fresh generation databases on the existing TEST PostgreSQL endpoint. Provisioning and cleanup require a verified owner approval for the exact bounded manifest; this branch is not installed or activated.
+
+Read [managed slots](docs/managed-slots.md), the [NewYou integration contract](docs/newyou-integration-contract.md), and the [requested target manifest](docs/activation/newyou-workstation-manifest.json). NewYou consumer wiring, real application/PLT proof and staged activation remain separate WELL-147 work.
+
 ## Repository status
 
 The current release is [`v1.1.0`](https://github.com/JCSchoeman96/devcore-project/releases/tag/v1.1.0), from source commit `60f2ef09e52abca7b20f1572795579a549ba9d61`. The `devcore-project` asset SHA-256 is `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`; post-merge CI run `39967037057` passed on that commit. It preserves existing v1 owner-only consumers and adds optional, backward-compatible supplemental-secret delivery through `SUPPLEMENTAL_SECRETS`. Durable Ticketing adoption remains TICK-42. The first repository-owned baseline, [`v1.0.1`](https://github.com/JCSchoeman96/devcore-project/releases/tag/v1.0.1), and recovered v1.0.0 files remain part of the release history; the recovered files are provenance evidence, not canonical source. See [provenance](docs/provenance.md).

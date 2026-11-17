@@ -8,10 +8,10 @@ Use Bash, GNU `date` with nanosecond formatting, `flock`, `stat`, `sha256sum`, `
 
 ## Install or update
 
-Download the executable and checksum file from an authorized repository release. Verify the checksum before installation, then pass the exact release version and digest to the installer:
+Download the executable and checksum file from an authorized release in the canonical `Carpe-Diem-Media/devcore-project` repository. Historical versioned release links below preserve their original provenance. Verify the checksum before installation, then pass the exact release version and digest to the installer:
 
 ```sh
-gh release download v1.1.0 --repo JCSchoeman96/devcore-project \
+gh release download v1.1.0 --repo Carpe-Diem-Media/devcore-project \
   --pattern devcore-project --pattern devcore-project.sha256
 sha256sum --check --status devcore-project.sha256
 expected_sha256="$(awk 'NR == 1 { print $1 }' devcore-project.sha256)"

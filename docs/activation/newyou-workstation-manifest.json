@@ -1,0 +1,154 @@
+{
+  "manifest": {
+    "contract": {
+      "version": 1,
+      "project": "new_you",
+      "slots": 20,
+      "http_base": 4220,
+      "test_host": "127.0.0.1",
+      "test_port": 55433,
+      "database_prefix": "dc_new_you_s",
+      "dev_database": "new_you_dev",
+      "legacy_test_database": "new_you_test",
+      "test_container": "dev-core-postgres-test-1",
+      "admin_role": "devcore_admin",
+      "database_owner": "devcore_admin"
+    },
+    "registry": "/home/jcschoeman96/.config/dev-core/slots/new_you",
+    "targets": [
+      {
+        "slot": 1,
+        "port": 4221,
+        "database": "dc_new_you_s01_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s01_g<same generation>_r"
+      },
+      {
+        "slot": 2,
+        "port": 4222,
+        "database": "dc_new_you_s02_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s02_g<same generation>_r"
+      },
+      {
+        "slot": 3,
+        "port": 4223,
+        "database": "dc_new_you_s03_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s03_g<same generation>_r"
+      },
+      {
+        "slot": 4,
+        "port": 4224,
+        "database": "dc_new_you_s04_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s04_g<same generation>_r"
+      },
+      {
+        "slot": 5,
+        "port": 4225,
+        "database": "dc_new_you_s05_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s05_g<same generation>_r"
+      },
+      {
+        "slot": 6,
+        "port": 4226,
+        "database": "dc_new_you_s06_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s06_g<same generation>_r"
+      },
+      {
+        "slot": 7,
+        "port": 4227,
+        "database": "dc_new_you_s07_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s07_g<same generation>_r"
+      },
+      {
+        "slot": 8,
+        "port": 4228,
+        "database": "dc_new_you_s08_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s08_g<same generation>_r"
+      },
+      {
+        "slot": 9,
+        "port": 4229,
+        "database": "dc_new_you_s09_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s09_g<same generation>_r"
+      },
+      {
+        "slot": 10,
+        "port": 4230,
+        "database": "dc_new_you_s10_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s10_g<same generation>_r"
+      },
+      {
+        "slot": 11,
+        "port": 4231,
+        "database": "dc_new_you_s11_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s11_g<same generation>_r"
+      },
+      {
+        "slot": 12,
+        "port": 4232,
+        "database": "dc_new_you_s12_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s12_g<same generation>_r"
+      },
+      {
+        "slot": 13,
+        "port": 4233,
+        "database": "dc_new_you_s13_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s13_g<same generation>_r"
+      },
+      {
+        "slot": 14,
+        "port": 4234,
+        "database": "dc_new_you_s14_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s14_g<same generation>_r"
+      },
+      {
+        "slot": 15,
+        "port": 4235,
+        "database": "dc_new_you_s15_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s15_g<same generation>_r"
+      },
+      {
+        "slot": 16,
+        "port": 4236,
+        "database": "dc_new_you_s16_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s16_g<same generation>_r"
+      },
+      {
+        "slot": 17,
+        "port": 4237,
+        "database": "dc_new_you_s17_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s17_g<same generation>_r"
+      },
+      {
+        "slot": 18,
+        "port": 4238,
+        "database": "dc_new_you_s18_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s18_g<same generation>_r"
+      },
+      {
+        "slot": 19,
+        "port": 4239,
+        "database": "dc_new_you_s19_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s19_g<same generation>_r"
+      },
+      {
+        "slot": 20,
+        "port": 4240,
+        "database": "dc_new_you_s20_g<32 lowercase UUID hex>",
+        "role": "dc_new_you_s20_g<same generation>_r"
+      }
+    ],
+    "cleanup": "registered generation, catalog OIDs and ownership comments, no jobs, zero clients; no FORCE",
+    "protected": [
+      "new_you_dev",
+      "new_you_test",
+      "postgres",
+      "template0",
+      "template1",
+      "unregistered targets"
+    ]
+  },
+  "sha256": "3fb71d0ed24dfc4ab8ef75226916da624f5ca4a18343695a154733eb2a93e556",
+  "approval_text": "DEVCORE_SLOT_APPROVAL_V1\nmanifest-sha256: 3fb71d0ed24dfc4ab8ef75226916da624f5ca4a18343695a154733eb2a93e556\nI authorize creation and automatic cleanup of only the registered NewYou disposable TEST generations described by this exact manifest. Existing databases and unknown sessions must remain untouched.",
+  "authorization_status": "NOT_AUTHORIZED",
+  "installation_status": "NOT_INSTALLED"
+}
