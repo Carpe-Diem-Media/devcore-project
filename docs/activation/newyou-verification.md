@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `d478d3e08fec8018f910805eaeebba410a076a84`. Its executable SHA-256 is `cec71c6461da8e9fd71931dc5e1a32de7cc07b852f65806991b31acd91673202`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `4f755dc236e76f9150779994663cbcc76f882160`. Its executable SHA-256 is `ba42c20dae2df6aba81e47c7159351c36d762fa5df08342563b9678d2d5011a2`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -13,7 +13,7 @@ Commands ran from the isolated DevCore worktree rooted at `.worktrees/newyou-slo
 - Baseline `python3 -m unittest discover -s tests -q` at source base ran 77 tests successfully, with two opt-in PostgreSQL integration skips.
 - Focused red/green commands used `python3 -m unittest tests.test_slots -q` and individual named cases. They first failed for the missing allocator, administrative adapter and supervisor. Later regression cases failed for stdin loss, container-name SQL targeting, self-issued activation references, retained secret snapshots, discarded build overrides and missing heavy-capacity fencing/classification, then passed after their corresponding fixes.
 - An early full working-candidate gate failed only `DevCoreBaselineTests.test_repository_owned_version_is_reported`, which still expected 1.1.0 after the intentional source version bump. The assertion was updated to the reviewed 1.2.0 source version. This was a changed-input correction, not an unchanged retry.
-- After the catalog fix, `python3 -m unittest discover -s tests -v` ran 127 tests in 47.223 seconds and returned `OK (skipped=3)`. The three skips are the explicitly opt-in PostgreSQL integration tests. This means 124 executed tests passed locally, not that live SQL isolation was proved locally. The new slot module has 49 focused tests.
+- After the catalog and directed contract fixes, `python3 -m unittest discover -s tests -v` ran 128 tests in 46.335 seconds and returned `OK (skipped=3)`. The three skips are the explicitly opt-in PostgreSQL integration tests. This means 125 executed tests passed locally, not that live SQL isolation was proved locally. The new slot module has 50 focused tests.
 - `bash -n bin/devcore-project install/install.sh install/rollback.sh` passed.
 - `shellcheck bin/devcore-project install/install.sh install/rollback.sh` passed.
 - `git diff --check` and the staged equivalent passed. The complete staged implementation diff was inspected for scope, credentials, generated env files and destructive targets. All test credentials are synthetic.
@@ -24,7 +24,9 @@ The standard local command skips Docker integration. The existing hosted `postgr
 
 Hosted run `44051906490` at PR head `7f09b219293fc700bcb995de9478bc4dee6ca4f5` passed `checks` and failed the new PostgreSQL scenario during preparation. PostgreSQL serializes raw OID values as JSON strings, while the metadata verifier requires integers. The regression `PostgresAdapterTests.test_catalog_oids_have_numeric_json_types_at_postgres_boundary` reproduced that failure before explicit `bigint` casts fixed the SQL boundary. All six adapter tests and the full local suite then passed. This does not resolve hosted verification until a fresh run passes for the corrected head. The two existing integration scenarios passed in the failed run.
 
-OCR was invoked as `ocr review --from origin/main --to HEAD` on implementation checkpoint `1e10975b518a1301a70839517e7938188f7acc7b` with comparison base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`, after local gates passed. The exact outcome, coverage, exclusions and any quota error belong in the PR's OCR Review Findings and Plane record. No OCR result is asserted here before it is observed. Native independent review must also inspect the exact final diff, head, authority and CI. Neither review authorizes merge or activation by itself.
+Corrected head `46f2f72656376a4f6a87606c1b3f2a8b7b3aa51f` passed both hosted jobs in run `44053367803`, including the real disposable PostgreSQL scenario. Independent review found no concrete safety blocker on that head. Subsequent directed changes clarify the partial-cleanup quarantine limit and explicitly reject managed `run all` before side effects. Its regression first failed for the generic argparse message, then passed after the explicit error. The executable changed, so final CI/OCR and independent review must use the newer candidate.
+
+OCR was invoked as `ocr review --from origin/main --to HEAD` on implementation checkpoint `1e10975b518a1301a70839517e7938188f7acc7b` with comparison base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`, after local gates passed. That original scan finished with four medium findings and one planning timeout. Independent review directed the partial-cleanup and all-profile contract/error corrections; dead-job and heavy-permit quarantine remain documented safety limits. A second scan covers `46f2f72656376a4f6a87606c1b3f2a8b7b3aa51f`; a refreshed scan must cover the corrected source checkpoint. The exact outcome, coverage, exclusions and any quota error belong in the PR's OCR Review Findings and Plane record. No OCR result is asserted here before it is observed. Native independent review must also inspect the exact final diff, head, authority and CI. Neither review authorizes merge or activation by itself.
 
 ## Reviewable installation and rollback commands
 
@@ -35,7 +37,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 cec71c6461da8e9fd71931dc5e1a32de7cc07b852f65806991b31acd91673202
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 ba42c20dae2df6aba81e47c7159351c36d762fa5df08342563b9678d2d5011a2
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```

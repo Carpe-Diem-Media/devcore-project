@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "d478d3e08fec8018f910805eaeebba410a076a84",
+  "source_commit": "4f755dc236e76f9150779994663cbcc76f882160",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "cec71c6461da8e9fd71931dc5e1a32de7cc07b852f65806991b31acd91673202",
+  "executable_sha256": "ba42c20dae2df6aba81e47c7159351c36d762fa5df08342563b9678d2d5011a2",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -240,6 +240,7 @@
     "generated secret entries and diagnostic logs retained without automatic purge",
     "does not isolate shared DEV",
     "does not implement NewYou PLT or application wiring",
-    "not installed or activated by the source change"
+    "not installed or activated by the source change",
+    "managed run all is explicitly unavailable; only dev/test profiles use slots"
   ]
 }
