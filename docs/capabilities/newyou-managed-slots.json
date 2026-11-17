@@ -278,7 +278,7 @@
     "does not implement NewYou PLT or application wiring",
     "not installed or activated by the source change",
     "managed run all is explicitly unavailable; only dev/test profiles use slots",
-    "workstation new_you_test currently permits PUBLIC CONNECT; separate exact-target ACL authorization and compatibility verification required before provisioning"
+    "workstation new_you_test PUBLIC CONNECT was separately revoked under exact guarded authorization; owner CONNECT was preserved and doctor passed. Managed-role denial remains part of the unfinished NewYou live pilot"
   ],
   "legacy_connection_proposal": "docs/activation/newyou-legacy-connect-proposal.md",
   "source_version": "1.2.1",
