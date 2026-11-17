@@ -15,6 +15,47 @@ TOOL = ROOT / "bin" / "devcore-project"
 RUN_INTEGRATION = os.environ.get("DEVCORE_RUN_POSTGRES_INTEGRATION") == "1"
 
 
+class IntegrationFixtureTests(unittest.TestCase):
+    """Exercise fixture boundaries without Docker or workstation resources."""
+    def test_readiness_uses_authenticated_tcp_instead_of_temporary_unix_server(self):
+        from unittest.mock import Mock
+        fixture = PostgresIntegrationTests()
+        fixture.admin_password = "synthetic-admin-password"
+        fixture.containers = []
+        fixture._run = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, "container-id", ""),
+            subprocess.CompletedProcess([], 0, "127.0.0.1:54321\n", ""),
+            subprocess.CompletedProcess([], 0, "1\n", ""),
+        ])
+        self.assertEqual(fixture._start_container("ci-owned"), 54321)
+        probe = fixture._run.call_args_list[-1]
+        arguments = probe.args[0]
+        self.assertIn("-h 127.0.0.1", " ".join(arguments))
+        self.assertNotIn(fixture.admin_password, " ".join(arguments))
+        self.assertEqual(probe.kwargs.get("input_text"), fixture.admin_password + "\n")
+
+    def test_bootstrap_failure_reports_connection_and_container_state_without_secrets(self):
+        from unittest.mock import Mock
+        fixture = PostgresIntegrationTests()
+        fixture.admin_password = "synthetic-admin-password"
+        fixture.dev_password = "synthetic-dev-password"
+        fixture.test_password = "synthetic-test-password"
+        fixture.new_passwords = ["synthetic-new-password"]
+        fixture._docker_psql = Mock(return_value=subprocess.CompletedProcess([], 2, "",
+            "server closed connection " + " ".join([fixture.admin_password, fixture.dev_password,
+                fixture.test_password, *fixture.new_passwords])))
+        fixture._run = Mock(return_value=subprocess.CompletedProcess([], 0, "running|0|false", ""))
+        with self.assertRaises(AssertionError) as failure:
+            fixture._create_admin("ci-owned")
+        message = str(failure.exception)
+        self.assertIn("exit 2", message)
+        self.assertIn("server closed connection", message)
+        self.assertIn("running|0|false", message)
+        for password in (fixture.admin_password, fixture.dev_password, fixture.test_password,
+                         *fixture.new_passwords):
+            self.assertNotIn(password, message)
+
+
 @unittest.skipUnless(
     RUN_INTEGRATION,
     "set DEVCORE_RUN_POSTGRES_INTEGRATION=1 to run disposable PostgreSQL integration checks",
@@ -148,7 +189,13 @@ class PostgresIntegrationTests(unittest.TestCase):
         port = int(port_result.stdout.strip().rsplit(":", 1)[1])
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            ready = self._docker_psql(name, "SELECT 1", check=False)
+            # The image starts a socket-only temporary server during initdb.
+            # Only the final server accepts authenticated TCP connections.
+            ready = self._run(["docker", "exec", "-i", name, "sh", "-c",
+                'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; '
+                'exec psql -X -qAt -w -v ON_ERROR_STOP=1 -h 127.0.0.1 '
+                '-U postgres -d postgres -c "SELECT 1"'],
+                input_text=self.admin_password + "\n", check=False)
             if ready.returncode == 0:
                 return port
             time.sleep(0.5)
@@ -160,14 +207,29 @@ class PostgresIntegrationTests(unittest.TestCase):
             "CREATE ROLE devcore_admin WITH LOGIN SUPERUSER;",
             check=False,
         )
-        self.assertEqual(result.returncode, 0, "could not create isolated DevCore admin role")
+        if result.returncode:
+            state = self._run(["docker", "inspect", "-f",
+                "{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}", container], check=False)
+            self.fail(self._redact(f"isolated DevCore admin bootstrap exit {result.returncode}; "
+                      f"container state {state.stdout.strip()}; {result.stderr.strip()}"))
+
+    def _redact(self, text):
+        for password in (self.admin_password, self.dev_password, self.test_password,
+                         *(getattr(self, "new_passwords", None) or [])):
+            if password:
+                text = text.replace(password, "[REDACTED]")
+        return text
 
     def _docker_psql(self, container, sql, check=True):
-        return self._run(
+        result = self._run(
             ["docker", "exec", "-i", container, "psql", "-X", "-q", "-v",
              "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres", "-c", sql],
             check=check,
         )
+        if check:
+            self.assertEqual(result.returncode, 0,
+                self._redact(f"CI-owned PostgreSQL SQL exit {result.returncode}: {result.stderr.strip()}"))
+        return result
 
     def _run(self, args, *, env=None, timeout=30, check=True, input_text=None):
         child_env = os.environ.copy()
@@ -319,6 +381,22 @@ class PostgresIntegrationTests(unittest.TestCase):
         pool = m.Pool(self.root / "slot-pool", m.newyou_contract(), adapter,
                       port_available=lambda _: True, approval_check=approve_for_test)
         pool.enable(pool.manifest_digest(), "ci-owned-disposable-targets")
+        # This legacy analogue exists only inside this test's labelled container.
+        # Default PUBLIC CONNECT must block provisioning before any managed role.
+        self._docker_psql(container, "CREATE ROLE new_you_test LOGIN NOCREATEDB;")
+        self._docker_psql(container, "CREATE DATABASE new_you_test OWNER new_you_test;")
+        with self.assertRaisesRegex(m.SlotError, "legacy TEST PUBLIC CONNECT"):
+            pool.acquire(str(self.root))
+        blocked = pool.status()[0]
+        self.assertEqual(blocked["state"], "free")
+        self.assertEqual(passwords, {})
+        self.assertEqual(adapter.executor("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname="
+                         + m.sql_literal(blocked["role"]) + ");"), "f")
+        # Simulate separately authorized hardening on the CI-owned analogue only.
+        # Production code never changes an existing database's privileges.
+        self._docker_psql(container, "REVOKE CONNECT ON DATABASE new_you_test FROM PUBLIC;")
+        self.assertEqual(adapter.executor("SELECT has_database_privilege('new_you_test', "
+                         "'new_you_test', 'CONNECT');"), "t")
         paths = [self.root / "worktree-a", self.root / "worktree-b"]
         for path in paths:
             path.mkdir()
@@ -352,6 +430,8 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")
         self.assertNotEqual(runtime(a, "SELECT 1", b["database"]).returncode, 0,
                             "slot A could connect to slot B")
+        self.assertNotEqual(runtime(a, "SELECT 1", "new_you_test").returncode, 0,
+                            "slot A could connect to protected legacy TEST")
         self.assertNotEqual(runtime(a, "CREATE DATABASE forbidden_extra_database").returncode, 0,
                             "runtime role unexpectedly had CREATEDB")
         # Independent connections keep committed markers. Cleanup removes only A.

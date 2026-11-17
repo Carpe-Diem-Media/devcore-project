@@ -1330,6 +1330,10 @@ class SlotError(RuntimeError):
     """A non-secret operational diagnosis safe for normal CLI output."""
 
 
+class ConnectionBoundaryError(SlotError):
+    """Legacy CONNECT requires separate authority; never expose raw SQL errors."""
+
+
 def newyou_contract():
     return {
         "version": 1, "project": "new_you", "slots": 20, "http_base": 4220,
@@ -1498,8 +1502,10 @@ class Pool:
                     raise SlotError("registry manifest changed; preserve existing allocations")
             else:
                 state = {"version": 1, "manifest": self.manifest_digest(), "slots": {}}
+            original = copy.deepcopy(state)
             yield state
-            atomic_json(data_path, state)
+            if state != original:
+                atomic_json(data_path, state)
         finally:
             os.close(fd)
 
@@ -1573,11 +1579,18 @@ class Pool:
             time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         try:
             catalog = self.resources.prepare(copy.deepcopy(candidate))
-        except Exception:
+        except Exception as error:
+            boundary = isinstance(error, ConnectionBoundaryError)
+            diagnosis = ("legacy TEST PUBLIC CONNECT is unsafe or unknown; separate approval required; no resources created"
+                         if boundary
+                         else "preparation incomplete; exact-target inspection required")
             with self.registry() as state:
                 row = self.owned(state, candidate["lease_id"], candidate["generation"], worktree)
-                row.update(state="quarantined", diagnosis="preparation incomplete; exact-target inspection required")
-            raise SlotError("slot quarantined after preparation failure; no resources adopted or deleted") from None
+                # Only this typed adapter rejection proves it occurred before
+                # credentials or mutations. Unknown failures remain quarantined.
+                row.update(state="free" if boundary else "quarantined", diagnosis=diagnosis)
+            raise SlotError(("slot not acquired; " if boundary else "slot quarantined after preparation failure; ")
+                            + diagnosis) from None
         with self.registry() as state:
             row = self.owned(state, candidate["lease_id"], candidate["generation"], worktree)
             if row["state"] != "preparing":
@@ -1764,6 +1777,15 @@ WHERE d.datname={database};
                                f"OR EXISTS(SELECT FROM pg_roles WHERE rolname={sql_literal(role)});")
         if exists != "f":
             raise SlotError("database or role already exists; implicit adoption is forbidden")
+        # A per-role REVOKE cannot override PUBLIC. Refuse creation until an
+        # independently authorized legacy ACL change has closed this boundary.
+        public_connect = self.executor("SELECT EXISTS(SELECT FROM "
+            "aclexplode(COALESCE(datacl, acldefault('d', datdba))) "
+            "WHERE grantee=0 AND privilege_type='CONNECT') "
+            "FROM pg_database WHERE datname='new_you_test';")
+        if public_connect != "f":
+            raise ConnectionBoundaryError("legacy TEST PUBLIC CONNECT is allowed or unknown; "
+                                          "managed provisioning requires a separately approved connection boundary")
         password = self.password(row)
         if not re.fullmatch(r"[A-Za-z0-9._:/+=,@%_-]+", password):
             raise SlotError("managed password is not a supported literal")
@@ -2026,6 +2048,15 @@ def signal_owned_descendants(supervisor, number):
         raise SlotError("some owned descendants could not be signalled; preserve resources")
 
 
+def write_all(fd, data):
+    remaining = memoryview(data)
+    while remaining:
+        count = os.write(fd, remaining)
+        if count <= 0:
+            raise OSError("output write made no progress")
+        remaining = remaining[count:]
+
+
 def managed_run(pool, lease, command, env, *, http=False, auto_release=True, redact=(), heavy=False):
     """Supervise through all descendants; abnormal supervisor loss stays quarantined."""
     if not command:
@@ -2128,7 +2159,7 @@ def managed_run(pool, lease, command, env, *, http=False, auto_release=True, red
                         log.write(data)
                         log.flush()
                         try:
-                            os.write(sys.stdout.fileno(), data)
+                            write_all(sys.stdout.fileno(), data)
                         except (OSError, AttributeError):
                             pass
                         if not chunk:

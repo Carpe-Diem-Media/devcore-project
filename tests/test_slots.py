@@ -95,6 +95,16 @@ class SlotTests(unittest.TestCase):
             self.release(old)
         self.assertEqual(self.pool.status()[0]["lease_id"], new["lease_id"])
 
+    def test_status_and_exhausted_wait_do_not_rewrite_unchanged_registry(self):
+        from unittest.mock import patch
+        for _ in range(20):
+            self.claim()
+        with patch.object(self.m, "atomic_json", wraps=self.m.atomic_json) as write:
+            self.pool.status()
+            with self.assertRaisesRegex(self.m.SlotError, "exhausted"):
+                self.pool.acquire(self.worktree, wait=0.12)
+        write.assert_not_called()
+
     def test_wrong_worktree_or_generation_cannot_release(self):
         lease = self.claim()
         for generation, worktree in (("bad", self.worktree), (lease["generation"], "/tmp")):
@@ -118,6 +128,20 @@ class SlotTests(unittest.TestCase):
         with self.assertRaisesRegex(self.m.SlotError, "quarantined"):
             self.release(lease)
         self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+
+    def test_connection_boundary_failure_keeps_empty_slot_reusable_with_nonsecret_diagnosis(self):
+        from unittest.mock import patch
+        self.assertTrue(hasattr(self.m, "ConnectionBoundaryError"))
+        with patch.object(self.resources, "prepare", side_effect=self.m.ConnectionBoundaryError("synthetic_secret")):
+            for _ in range(21):
+                with self.assertRaisesRegex(self.m.SlotError, "legacy TEST PUBLIC CONNECT") as error:
+                    self.claim()
+        row = self.pool.status()[0]
+        self.assertEqual(len(self.pool.status()), 1)
+        self.assertEqual(row["state"], "free")
+        self.assertIn("legacy TEST PUBLIC CONNECT", row["diagnosis"])
+        self.assertNotIn("synthetic_secret", str(error.exception) + json.dumps(row))
+        self.assertEqual(self.claim()["slot"], 1)
         self.assertEqual(self.claim()["slot"], 2)
 
     def test_remaining_clients_prevent_reuse(self):
@@ -264,6 +288,8 @@ class PostgresAdapterTests(unittest.TestCase):
         self.statements.append(statement)
         if "json_build_object" in statement:
             return json.dumps(self.catalog)
+        if "aclexplode" in statement:
+            return "f"
         if "EXISTS" in statement and "pg_database" in statement:
             return "f"
         if "count(*)" in statement:
@@ -286,6 +312,34 @@ class PostgresAdapterTests(unittest.TestCase):
         self.adapter.executor = lambda sql: "t"
         with self.assertRaisesRegex(self.m.SlotError, "already exists"):
             self.adapter.prepare(self.lease)
+
+    def test_legacy_public_connect_or_uncertain_acl_blocks_before_credentials_or_creation(self):
+        from unittest.mock import Mock
+        for result in ("t", "", "unexpected"):
+            with self.subTest(result=result):
+                self.statements.clear()
+                password = Mock(return_value="synthetic_password")
+                self.adapter.password = password
+                def sql(statement):
+                    if "aclexplode" in statement:
+                        self.statements.append(statement)
+                        return result
+                    return self.sql(statement)
+                self.adapter.executor = sql
+                with self.assertRaisesRegex(self.m.SlotError, "legacy TEST.*CONNECT"):
+                    self.adapter.prepare(self.lease)
+                password.assert_not_called()
+                self.assertFalse(any("CREATE " in x or "ALTER " in x or "REVOKE " in x
+                                     for x in self.statements))
+
+    def test_legacy_acl_guard_reads_effective_public_connect_without_mutating_it(self):
+        self.adapter.prepare(self.lease)
+        guard = next((x for x in self.statements if "aclexplode" in x), "")
+        self.assertIn("acldefault('d', datdba)", guard)
+        self.assertIn("grantee=0", guard)
+        self.assertIn("privilege_type='CONNECT'", guard)
+        self.assertIn("datname='new_you_test'", guard)
+        self.assertNotIn("REVOKE", guard)
 
     def test_catalog_oids_have_numeric_json_types_at_postgres_boundary(self):
         def postgres_json(statement):
@@ -367,6 +421,21 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(row["NEW_YOU_PORT"], str(self.lease["port"]))
         self.assertTrue(row["DEVCORE_SLOT_JOB"])
         self.assertEqual(self.pool.status()[0]["state"], "free")
+
+    def test_console_forwarding_retries_short_writes_and_rejects_zero_progress(self):
+        from unittest.mock import patch
+        received = bytearray()
+        def short_write(fd, data):
+            self.assertEqual(fd, 123)
+            count = min(3, len(data))
+            received.extend(data[:count])
+            return count
+        with patch.object(self.m.os, "write", side_effect=short_write):
+            self.m.write_all(123, b"complete synthetic output")
+        self.assertEqual(received, b"complete synthetic output")
+        with patch.object(self.m.os, "write", return_value=0):
+            with self.assertRaises(OSError):
+                self.m.write_all(123, b"output")
 
     def test_failing_command_retains_redacted_diagnosis(self):
         code = self.m.managed_run(self.pool, self.lease,

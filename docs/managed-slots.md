@@ -16,6 +16,8 @@ After source review and separately authorized installation, the owner posts the 
 
 Approval covers only future allocator-created generations satisfying every recorded guard. It never covers legacy, retained shared, production, unrelated or merely similarly named databases. The local receipt avoids a network or owner round trip for routine leases. Agents must not invoke enable before the owner actually grants the bounded authorization. A changed manifest requires new approval. Source review, merge authority, installation authority and cleanup authority are distinct.
 
+Activation also requires a safe legacy connection boundary. Before creating a role or generating its password, provisioning reads the effective `PUBLIC CONNECT` ACL of exactly `new_you_test`. Default or explicit PUBLIC CONNECT, a missing database or an unknown returned value blocks preparation without changing privileges. This typed rejection proves no resources were created, so the empty slot returns to `free` and must pass fresh preparation on its next claim. SQL/endpoint exceptions and uncertain preparation still quarantine. PostgreSQL has no per-role DENY that overrides PUBLIC. Read-only workstation checks on 2026-11-17 confirmed the legacy allocation permits PUBLIC CONNECT; no privileges were changed. The [separate connection-boundary proposal](activation/newyou-legacy-connect-proposal.md) requires owner authorization before implementation or execution. The disposable cleanup approval does not authorize that proposal.
+
 ## Normal commands after integration and activation
 
 All NewYou Elixir/Mix commands retain Mise outside DevCore:
@@ -57,6 +59,8 @@ Linux must provide `pidfd_open` and `pidfd_send_signal`, and Python must expose 
 A free port alone never establishes database ownership. Acquisition skips occupied ports. Before launch, the supervisor binds the port again. TEST commands retain that reservation for their complete lifetime. DEV commands hand the socket to the server by closing the reservation immediately before execution, then inspect listening socket ownership immediately and at most four times per second during supervision. A foreign listener during that handoff quarantines the lease; it is never killed. Temporary helper servers may still use port 0.
 
 Process identity combines PID, Linux boot ID and start time. Registry changes use fsync and atomic rename under flock. Recovery never trusts an elapsed heartbeat. `slots recover` quarantines interrupted preparation, cleanup or dead supervisors. A killed supervisor can leave live descendants, so recovery does not reclaim that allocation even when its original PID or HTTP listener is gone. This conservative quarantine also covers machine restart. No automatic repair deletes uncertain resources.
+
+Read-only status and unchanged exhaustion/wait passes hold the same lock but do not rewrite or fsync unchanged registry contents.
 
 If cleanup failed before removing either recorded identity, with no jobs, its exact owner may retry after the problem resolves:
 
