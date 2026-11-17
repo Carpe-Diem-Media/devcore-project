@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "3e005d4aa94523d1bb82b7d7f2cdedfe2fcee66b",
+  "source_commit": "189f2ad74613212b34b5fe9d0cd831f07cc57ca3",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2",
+  "executable_sha256": "27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -169,6 +169,19 @@
         "dead/interrupted registered supervisor or operation"
       ],
       "side_effects": "no deletion, no termination, no reassignment"
+    },
+    {
+      "from": [
+        "ready",
+        "retained"
+      ],
+      "to": "retained",
+      "owner": "Pool.retain",
+      "guards": [
+        "exact lease/generation/worktree",
+        "no jobs"
+      ],
+      "selection": "explicit retention or known prelaunch port conflict; no process signalled"
     }
   ],
   "security": {
@@ -206,7 +219,7 @@
     "initial_approval": "exact manifest text in verified JCSchoeman96 comment in owning GitHub repository",
     "nested_environment": "verified descendant/job, registered origin profile, rebuilt binding, partial/declaration fallback rejected",
     "supplemental_profiles": "purge every declared name; inject active/all from canonical store; DEV imports only TEST database keys",
-    "alternate_connection_variables": "rendered DATABASE_URL and PG aliases fail closed after merging",
+    "alternate_connection_variables": "PG*, names containing DATABASE_URL, DB_URL and *_DB_URL rejected after merging; only five supported DEV/TEST_DATABASE binding keys",
     "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback",
     "legacy_test_boundary": "Effective PUBLIC CONNECT on exact new_you_test must be false before credentials/role creation; existing ACL never changed automatically"
   },
@@ -217,7 +230,9 @@
     "port_race": "pre-launch bind; immediate DEV listener inspection then at most four checks per second",
     "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites",
     "failure": "retain private redacted logs/results and unavailable database",
-    "capacity": "automatic heavy Mix classification; at most 2 permits; proven pre-launch failure frees permit, uncertain launch quarantines"
+    "capacity": "automatic heavy Mix classification; at most 2 permits; proven pre-launch failure frees permit, uncertain launch quarantines",
+    "prelaunch_port_conflict": "idle lease retained with diagnosis; exact retry/release allowed; active job and unknown listener untouched",
+    "listener_locality": "consumer must preserve and prove loopback bind; DevCore classifier checks process/port only"
   },
   "tests": [
     {
@@ -251,7 +266,8 @@
     "automatic cache-specific PLT synchronization and local copies for mutable core reads",
     "two consenting worktrees and failed-run retain/reuse",
     "measured full-suite concurrency",
-    "separate NewYou PR, exact-head review/CI and resulting-main verification"
+    "separate NewYou PR, exact-head review/CI and resulting-main verification",
+    "preserve existing 127.0.0.1 config and prove actual DEV/helper listener locality before integration/activation"
   ],
   "limitations": [
     "Linux only",

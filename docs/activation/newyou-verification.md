@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `3e005d4aa94523d1bb82b7d7f2cdedfe2fcee66b`. Its executable SHA-256 is `0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `189f2ad74613212b34b5fe9d0cd831f07cc57ca3`. Its executable SHA-256 is `27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -50,6 +50,18 @@ Before the workstation metadata query, `mise exec -- devcore-project doctor` fro
 
 A fresh `git fetch origin` still resolved main to base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`; `gh api user --jq .login` returned JC-Agents. `git status --short` in the dirty NewYou worktree showed the same WELL-144 files. `ss -Hltn '( sport >= 4220 and sport <= 4240 )'` showed the existing listener at 4237. `lslocks --noheadings --output PID,TYPE,MODE,PATH | rg 'newyou-shared-test-plt.lock'` found no current holder. These are observations at that checkpoint, not reservations or permission to reclaim anything.
 
+## Port-conflict and URL-alias corrections
+
+The scan at `da764b6abb4dd45c6883c1c99dfeeeed1aae3c2c` exited 0 after 25m22s with three findings across four selected files, session `ee2167de-9211-4e4a-9ec5-2bb8be1af650`. One planning timeout affected 1 of 45 requests, HTTP 200; no quota failure or provider switch occurred. Native independent review adjudicated the listener-address medium finding as conditional/non-blocking for the current NewYou configuration, the port-conflict medium finding as a confirmed correctness defect, and the URL-alias high finding as a medium source-boundary gap without evidence of current NewYou misrouting.
+
+The supported NewYou config/dev.exs, config/test.exs and runtime.exs DEV path bind `127.0.0.1`. DevCore's process/port classifier does not enforce a bind address. The consumer contract now explicitly requires preserving and proving actual loopback locality, including port-0 helpers, before WELL-147 integration/activation. No source-level wildcard rejection or network sandbox is claimed.
+
+Known pre-launch port conflicts now retain the idle allocation with a static diagnosis. Its owner can retry or release through the unchanged exact catalog/client guards without signaling the listener. Unknown post-launch foreign ownership still quarantines. Another command cannot change an existing active job through this path because retain rejects any active jobs. The new active-job regression failed against the prior committed module before passing against the correction.
+
+After merging, the environment rejects PG*, names containing DATABASE_URL, bare DB_URL, names ending in _DB_URL and unknown DEV_DATABASE_/TEST_DATABASE_ keys. Only HOST, PORT, NAME, USERNAME and PASSWORD are supported under those prefixes. Template and inherited-alias regressions plus the prelaunch release regression first produced nine failing subcases, then passed after the correction. This is a supported-variable boundary, not evidence that current NewYou LocalConfig consumed those aliases.
+
+At implementation checkpoint `189f2ad74613212b34b5fe9d0cd831f07cc57ca3`, `python3 -m unittest discover -s tests -v` passed 146 total in 49.447 seconds, with 143 executed passes and three opt-in PostgreSQL skips. The slot module has 66 tests. Bash syntax, ShellCheck, full diff whitespace and the source-linked hash checks passed. Exact previous head da764b6 passed both hosted jobs in run 44066522689, but that result is not copied to the corrected candidate. Fresh exact-head CI/OCR and native review are required. The legacy PUBLIC CONNECT activation prerequisite is unchanged and remains separately unauthorized.
+
 ## Reviewable installation and rollback commands
 
 These commands are a proposed installation procedure for this exact source artifact. They have not run against the live workstation. Execute them only after independent source review and explicit owner installation authorization. If the reviewed source changes, recompute its checksum and use the newly approved artifact. Do not silently install a moving branch.
@@ -59,7 +71,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```
