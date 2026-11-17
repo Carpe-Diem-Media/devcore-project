@@ -222,7 +222,7 @@ class PostgresIntegrationTests(unittest.TestCase):
 
     def _docker_psql(self, container, sql, check=True):
         result = self._run(
-            ["docker", "exec", "-i", container, "psql", "-X", "-q", "-v",
+            ["docker", "exec", "-i", container, "psql", "-X", "-qAt", "-v",
              "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres", "-c", sql],
             check=check,
         )

@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `a5caa029a4bf4049ec6d5f51d4df15d07d23dee3`. Its executable SHA-256 is `e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `a5caa029a4bf4049ec6d5f51d4df15d07d23dee3`. Its executable SHA-256 is `e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a`. Documentation and the CI-helper output-format correction may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -119,3 +119,41 @@ The existing installer keeps a sequenced previous executable. Rollback changes o
 ## Acceptance assessment boundary
 
 WELL-145 has eight source acceptance groups. Local evidence covers the 20-slot allocator, ownership/lifecycle, administrative guards, managed environment, negative/concurrency tests and integration documentation. Real PostgreSQL evidence is deferred to exact-head CI, and final independent review is still required. Source delivery is not installation, NewYou integration, shared-core PLT proof, the two-worktree NewYou business-fixture pilot, activation or resulting-main verification. Those are explicitly unverified under WELL-147 or the pending DevCore integration/release steps. Do not mark either issue Done from local checks alone.
+
+
+## PostgreSQL output-format correction and final OCR coverage
+
+Hosted run [44084409517](https://github.com/Carpe-Diem-Media/devcore-project/actions/runs/44084409517) at `11994fa78cb5d21d8b6fa47147fa93bcae310c2a` passed `checks` and failed `postgres-integration`. The new separate-DEV-cluster assertion expected bare `f`, but the CI helper invoked `psql -q` and returned a formatted table containing `f`. This was a test-output mismatch, not observed authentication success or a demonstrated isolation breach. The scenario stopped there, so its later cleanup/reuse assertions were not verified by that run. The two existing SQL scenarios passed.
+
+The correction changes only the helper's `-q` option to `-qAt`, matching the existing machine-readable runtime/readiness queries. All helper callers were inspected; only the new assertion consumes its stdout, while the other callers check setup/DDL outcomes. No assertion is weakened and no allocator, permission, provisioning or cleanup behavior changes. Fresh hosted CI runs the affected `DEVCORE_RUN_POSTGRES_INTEGRATION=1 python3 -m unittest tests.test_postgres_integration -v` proof in CI-owned disposable containers. The failed run remains evidence, not an unchanged-input retry reported as a fix.
+
+Full `ocr review --from origin/main --to HEAD` at `11994fa78cb5d21d8b6fa47147fa93bcae310c2a`, base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`, exited 0 with zero findings after 12m45s. Session `a2918715-33fe-4a53-8482-6e13893fa2eb`. One planning request timed out among 14 requests, HTTP 200, and the review continued without that plan. No quota error or provider change occurred.
+
+OCR selected four of 19 changed paths:
+
+- bin/devcore-project
+- docs/activation/newyou-workstation-manifest.json
+- docs/capabilities/newyou-managed-slots.json
+- docs/examples/newyou-slot-pool.json
+
+Configured path/extension filters excluded these 15 paths:
+
+- CHANGELOG.md
+- README.md
+- docs/activation/newyou-legacy-connect-proposal.md
+- docs/activation/newyou-verification.md
+- docs/architecture.md
+- docs/installation.md
+- docs/managed-slots.md
+- docs/newyou-integration-contract.md
+- docs/project-contract.md
+- docs/release-process.md
+- docs/security-model.md
+- docs/superpowers/plans/2026-11-17-newyou-slots.md
+- tests/test_devcore.py
+- tests/test_postgres_integration.py
+- tests/test_slots.py
+
+Zero findings therefore does not establish complete review coverage. Native independent review covered the complete implementation diff; final exact-head certification remains required. The output-format correction is a trivial test-helper delta in an excluded file, plus this evidence update. It is exempt from another material-engineering OCR scan because every selected file, executable byte, capability declaration and activation manifest is unchanged from the completed scan. This exemption does not claim OCR reviewed the changed test. The delta requires manual independent review and fresh exact-head CI before integration. Installation, cleanup activation and the legacy ACL proposal remain separately unauthorized.
+
+After the correction, `python3 -m unittest discover -s tests -v` ran 153 tests in 58.743 seconds, with 150 executed passes and three opt-in SQL skips. Bash syntax, ShellCheck, full diff whitespace and unchanged selected-path checks passed. Local Python is 3.15.2. Hosted SQL and final independent approval remain pending for this corrected candidate; the prior failing CI is not represented as passing.
