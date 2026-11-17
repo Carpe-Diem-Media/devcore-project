@@ -3,7 +3,7 @@ set -euo pipefail
 set +x
 umask 077
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 PROGRAM="devcore-project"
 
 CENTRAL_DIR="${DEVCORE_CONFIG_DIR:-$HOME/.config/dev-core}"
@@ -23,7 +23,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-devcore-project v1.2.0
+devcore-project v1.2.1
 
 Reusable local-project bootstrap for the shared dev-core workstation stack.
 
@@ -1183,8 +1183,8 @@ try:
             os.environ["DEVCORE_MUTATION_GLOBAL_CONF_PATH"] = str(global_conf)
             os.execv(script, [script, command, *args])
         finally:
-            if directory_fd >= 0:
-                os.close(directory_fd)
+            # The outer finally owns directory_fd on failure. Closing it here
+            # too masks a known contention result with an unrelated EBADF.
             for fd in descriptors:
                 os.close(fd)
     elif action == "validate":
@@ -2272,6 +2272,26 @@ class SlotContext:
         finally:
             shutil.rmtree(snapshot)
 
+    def render_snapshot(self, snapshot, renderer_env):
+        deadline = time.monotonic() + 30
+        contention = "ERROR: cannot acquire mutation lock: another DevCore mutation holds a state lock\n"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SlotError("managed environment rendering timed out waiting for a DevCore mutation lock")
+            try:
+                result = subprocess.run([self.tool, "render"], cwd=snapshot, env=renderer_env,
+                                        capture_output=True, text=True, timeout=remaining)
+            except subprocess.TimeoutExpired:
+                raise SlotError("managed environment rendering timed out") from None
+            if result.returncode == 0:
+                return
+            known_contention = (result.returncode == 1 and not result.stdout
+                                and result.stderr == contention)
+            if not known_contention:
+                raise SlotError("managed environment rendering failed; no worktree env files changed")
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
     def environment_snapshot(self, lease, profile, local_paths, snapshot):
         project = self.project.copy()
         project.pop("SLOT_POOL", None)
@@ -2304,10 +2324,7 @@ class SlotContext:
         renderer_env.update(DEVCORE_PROJECT_CONF=str(snapshot / "project.conf"),
                             DEVCORE_GLOBAL_CONF=self.global_file, DEVCORE_SECRETS_FILE=self.secret_file,
                             DEVCORE_CONFIG_DIR=str(self.central))
-        result = subprocess.run([self.tool, "render"], cwd=snapshot, env=renderer_env,
-                                capture_output=True, text=True, timeout=30)
-        if result.returncode:
-            raise SlotError("managed environment rendering failed; no worktree env files changed")
+        self.render_snapshot(snapshot, renderer_env)
         env = os.environ.copy()
         for key in list(env):
             if (key in ("DATABASE_URL", "MIX_TEST_PARTITION") or key.startswith(("PG", "DEVCORE_SLOT_", "DEVCORE_MUTATION_", "TEST_DATABASE_", "DEV_DATABASE_"))):
