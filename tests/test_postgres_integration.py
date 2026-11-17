@@ -410,9 +410,9 @@ class PostgresIntegrationTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             a, b = list(executor.map(claim, paths))
         self.assertNotEqual(a["database"], b["database"])
-        def runtime(row, sql, database=None):
+        def runtime(row, sql, database=None, target_container=None):
             result = self._run(
-                ["docker", "exec", "-i", container_id, "sh", "-c",
+                ["docker", "exec", "-i", target_container or container_id, "sh", "-c",
                  'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$1" -d "$2" -c "$3"',
                  "slot-runtime", row["role"], database or row["database"], sql],
                 input_text=passwords[row["role"]] + "\n", check=False)
@@ -432,6 +432,17 @@ class PostgresIntegrationTests(unittest.TestCase):
                             "slot A could connect to slot B")
         self.assertNotEqual(runtime(a, "SELECT 1", "new_you_test").returncode, 0,
                             "slot A could connect to protected legacy TEST")
+        # DEV is a separate cluster, not another database on the TEST endpoint.
+        # The managed LOGIN must not be created there or authenticate there.
+        dev_inspected = self._run(["docker", "inspect", "-f", "{{.Id}}", self.container_names[0]])
+        self.assertEqual(dev_inspected.returncode, 0, "could not inspect CI-owned DEV container")
+        dev_id = dev_inspected.stdout.strip()
+        self.assertNotEqual(dev_id, container_id)
+        dev_role = self._docker_psql(dev_id, "SELECT EXISTS(SELECT FROM pg_roles WHERE rolname="
+                                    + m.sql_literal(a["role"]) + ");")
+        self.assertEqual(dev_role.stdout.strip(), "f")
+        self.assertNotEqual(runtime(a, "SELECT 1", "postgres", target_container=dev_id).returncode, 0,
+                            "TEST generation credentials authenticated on the DEV cluster")
         self.assertNotEqual(runtime(a, "CREATE DATABASE forbidden_extra_database").returncode, 0,
                             "runtime role unexpectedly had CREATEDB")
         # Migration DDL is allowed, but database ACLs remain administrative.

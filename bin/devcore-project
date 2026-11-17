@@ -2355,6 +2355,16 @@ class SlotContext:
                     "TEST_DATABASE_PASSWORD": self.secrets.existing(lease)}
         if any(env.get(key) != value for key, value in expected.items()):
             raise SlotError("managed TEST template does not propagate the exact allocation")
+        if profile == "dev":
+            password = parse_pairs(self.secret_file).get(self.project["DEV_SECRET_KEY"])
+            if not password:
+                raise SlotError("canonical DEV credential is missing")
+            expected_dev = {"DEV_DATABASE_HOST": "127.0.0.1", "DEV_DATABASE_PORT": "55432",
+                            "DEV_DATABASE_NAME": self.project["DEV_DB_NAME"],
+                            "DEV_DATABASE_USERNAME": self.project["DEV_DB_ROLE"],
+                            "DEV_DATABASE_PASSWORD": password}
+            if any(env.get(key) != value for key, value in expected_dev.items()):
+                raise SlotError("managed DEV bindings do not match the canonical shared allocation")
         return env
 
     def redactions(self, lease):

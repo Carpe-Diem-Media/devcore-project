@@ -50,7 +50,7 @@ Inspect at least these current seams:
 
 Assert actual database/role/endpoint identity in child paths, not only marker propagation. Nested compatible DevCore calls reuse the active job. Preserve helper port 0 instead of consuming a second fixed slot. Audit intentional committed writes outside Sandbox rollback and teardown attribution. Do not clean another fixture's rows or treat a retained shared database as disposable.
 
-The Linux supervisor requires child-subreaper and pidfd support and covers all descendants until they exit, even after launcher loss. SIGHUP detaches; SIGINT/TERM stop only verified owned descendants while supervision continues. An abnormal supervisor loss quarantines resources; it does not terminate survivors. Do not modify active agents to adopt the allocator. Only consenting new sessions switch.
+The Linux supervisor requires child-subreaper and pidfd support and covers all descendants until they exit, even after launcher loss. SIGHUP detaches; SIGINT/TERM signal a verified snapshot of owned descendants while supervision continues. Signal-resistant or later descendants keep resources leased; repeated signals rescan, without automatic forced escalation. An abnormal supervisor loss quarantines resources; it does not terminate survivors. Do not modify active agents to adopt the allocator. Only consenting new sessions switch.
 
 ## Worktree builds and PLTs
 

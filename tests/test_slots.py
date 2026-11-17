@@ -663,6 +663,41 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(env["TEST_DATABASE_NAME"], self.lease["database"])
         self.assertEqual(env["MIX_ENV"], "dev")
 
+    def test_dev_template_cannot_redirect_or_omit_canonical_bindings(self):
+        rows = (self.fixture.project / ".devcore/render-map.tsv").read_text().splitlines()
+        row = next(line.split("\t") for line in rows if line.startswith("dev\t"))
+        template = self.fixture.project / row[1]
+        original = template.read_text()
+        for field, value in (("HOST", "192.0.2.23"), ("PORT", "55433"),
+                             ("NAME", "new_you_test"), ("USERNAME", "new_you_test"),
+                             ("PASSWORD", "synthetic-stale")):
+            variable = "DEV_DATABASE_" + field
+            for missing in (False, True):
+                with self.subTest(field=field, missing=missing):
+                    try:
+                        template.write_text("\n".join(
+                            line if not line.startswith(variable + "=") else
+                            ("" if missing else variable + "=" + value)
+                            for line in original.splitlines()) + "\n")
+                        with self.assertRaisesRegex(self.m.SlotError, "DEV bindings"):
+                            self.context.environment(self.lease, "dev")
+                    finally:
+                        template.write_text(original)
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
+    def test_dev_supplemental_binding_cannot_override_canonical_identity(self):
+        mapping = self.fixture.project / ".devcore/supplemental.tsv"
+        mapping.write_text("all\tDEV_DATABASE_NAME\tSYNTHETIC_STALE_DEV_NAME\n")
+        with self.fixture.secrets.open("a") as stream:
+            stream.write("SYNTHETIC_STALE_DEV_NAME=new_you_test\n")
+        self.context.project["SUPPLEMENTAL_SECRETS"] = str(mapping)
+        with self.assertRaisesRegex(self.m.SlotError, "DEV bindings"):
+            self.context.environment(self.lease, "dev")
+        test_env = self.context.environment(self.lease, "test")
+        self.assertNotIn("DEV_DATABASE_NAME", test_env)
+        self.assertEqual(test_env["TEST_DATABASE_NAME"], self.lease["database"])
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
     def test_arbitrary_parent_pg_values_and_build_overrides_fail_closed(self):
         os.environ.update(DATABASE_URL="ignored-parent-value", PGDATABASE="new_you_test")
         env = self.context.environment(self.lease, "test")
