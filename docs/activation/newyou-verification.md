@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `1e10975b518a1301a70839517e7938188f7acc7b`. Its executable SHA-256 is `383370ed4b25e20af8dbb4c347783c0310380c924a8772bfa49b7ff4a1813831`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `d478d3e08fec8018f910805eaeebba410a076a84`. Its executable SHA-256 is `cec71c6461da8e9fd71931dc5e1a32de7cc07b852f65806991b31acd91673202`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -13,7 +13,7 @@ Commands ran from the isolated DevCore worktree rooted at `.worktrees/newyou-slo
 - Baseline `python3 -m unittest discover -s tests -q` at source base ran 77 tests successfully, with two opt-in PostgreSQL integration skips.
 - Focused red/green commands used `python3 -m unittest tests.test_slots -q` and individual named cases. They first failed for the missing allocator, administrative adapter and supervisor. Later regression cases failed for stdin loss, container-name SQL targeting, self-issued activation references, retained secret snapshots, discarded build overrides and missing heavy-capacity fencing/classification, then passed after their corresponding fixes.
 - An early full working-candidate gate failed only `DevCoreBaselineTests.test_repository_owned_version_is_reported`, which still expected 1.1.0 after the intentional source version bump. The assertion was updated to the reviewed 1.2.0 source version. This was a changed-input correction, not an unchanged retry.
-- Final `python3 -m unittest discover -s tests -v` ran 126 tests in 46.979 seconds and returned `OK (skipped=3)`. The three skips are the explicitly opt-in PostgreSQL integration tests. This means 123 executed tests passed locally, not that live SQL isolation was proved locally. The new slot module has 48 focused tests.
+- After the catalog fix, `python3 -m unittest discover -s tests -v` ran 127 tests in 47.223 seconds and returned `OK (skipped=3)`. The three skips are the explicitly opt-in PostgreSQL integration tests. This means 124 executed tests passed locally, not that live SQL isolation was proved locally. The new slot module has 49 focused tests.
 - `bash -n bin/devcore-project install/install.sh install/rollback.sh` passed.
 - `shellcheck bin/devcore-project install/install.sh install/rollback.sh` passed.
 - `git diff --check` and the staged equivalent passed. The complete staged implementation diff was inspected for scope, credentials, generated env files and destructive targets. All test credentials are synthetic.
@@ -21,6 +21,8 @@ Commands ran from the isolated DevCore worktree rooted at `.worktrees/newyou-slo
 - An early syntax/lint batch was mistakenly invoked from the provenance directory and failed to find the relative source paths. Both checks were then rerun from the repository root and passed as recorded above.
 
 The standard local command skips Docker integration. The existing hosted `postgres-integration` job runs `DEVCORE_RUN_POSTGRES_INTEGRATION=1 python3 -m unittest tests.test_postgres_integration -v` against only its own labelled disposable containers. The new scenario provisions two fresh generations concurrently, commits distinct synthetic markers, denies cross-slot connections and CREATEDB, releases one generation without changing the other, and proves a fresh reacquisition has no old table. Its hosted result must be checked against the exact final PR head. No local workstation database substitutes for this proof.
+
+Hosted run `44051906490` at PR head `7f09b219293fc700bcb995de9478bc4dee6ca4f5` passed `checks` and failed the new PostgreSQL scenario during preparation. PostgreSQL serializes raw OID values as JSON strings, while the metadata verifier requires integers. The regression `PostgresAdapterTests.test_catalog_oids_have_numeric_json_types_at_postgres_boundary` reproduced that failure before explicit `bigint` casts fixed the SQL boundary. All six adapter tests and the full local suite then passed. This does not resolve hosted verification until a fresh run passes for the corrected head. The two existing integration scenarios passed in the failed run.
 
 OCR was invoked as `ocr review --from origin/main --to HEAD` on implementation checkpoint `1e10975b518a1301a70839517e7938188f7acc7b` with comparison base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`, after local gates passed. The exact outcome, coverage, exclusions and any quota error belong in the PR's OCR Review Findings and Plane record. No OCR result is asserted here before it is observed. Native independent review must also inspect the exact final diff, head, authority and CI. Neither review authorizes merge or activation by itself.
 
@@ -33,7 +35,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 383370ed4b25e20af8dbb4c347783c0310380c924a8772bfa49b7ff4a1813831
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 cec71c6461da8e9fd71931dc5e1a32de7cc07b852f65806991b31acd91673202
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```
