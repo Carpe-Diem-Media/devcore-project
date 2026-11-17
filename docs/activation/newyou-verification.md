@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `0dbc5e73dde771371f46578d7649e91cd527329e`. Its executable SHA-256 is `2d116f1d20ab5c880fdb66f2842c60c5fb819047b0ee89f8cd28725cda1e146a`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `3e005d4aa94523d1bb82b7d7f2cdedfe2fcee66b`. Its executable SHA-256 is `0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -36,6 +36,20 @@ Independent review confirmed nested mutable-environment trust and supplemental p
 
 Focused regressions reproduced each corrected behavior before its fix. Additional source review found and closed legacy-declaration fallback under managed markers, partial marker acquisition, KeyboardInterrupt during environment preparation and missing kernel pidfd support. The stable local gate above covers these corrections. The source-linked capability map points to the corrected implementation checkpoint. New exact-head CI, OCR and independent review must reconcile the current candidate before handoff; their current outcomes belong in PR #6 and WELL-145. Earlier green CI never substitutes for the new head.
 
+## Legacy connection boundary and latest directed corrections
+
+The scan at `24185615e86123021bc204053877b9bba8fc6d1a` finished with three findings in 19m30s, session `185420ee-168f-447d-94e0-57aff5a0aa68`. It exited 0. One planning timeout and two context-compaction cancellations affected 3 of 31 requests; no quota error or provider change occurred. Independent review confirmed the medium legacy PUBLIC CONNECT issue and two low findings about unchanged-registry fsync during waits and console short writes.
+
+At the current implementation checkpoint, provisioning checks effective PUBLIC CONNECT on exactly `new_you_test` before credentials or mutations. An explicit unsafe/unknown returned ACL value, including an absent database, raises a typed pre-mutation rejection and leaves the empty slot free for fresh preparation. SQL/endpoint exceptions remain quarantined. The distinction has a 21-attempt regression, so an unresolved prerequisite cannot consume the pool. Source does not change the legacy ACL. The [exact-target proposal](newyou-legacy-connect-proposal.md) remains NOT_AUTHORIZED and NOT_EXECUTED. The generation cleanup manifest does not authorize it.
+
+Read-only status and exhausted wait passes no longer persist unchanged registry state. Console forwarding retries short writes; zero progress raises an output error while the private log is preserved. Focused tests failed before these changes and passed afterward. The final local command `python3 -m unittest discover -s tests -v` ran 144 tests in 47.417 seconds, with 141 executed passes and three opt-in PostgreSQL skips. `bash -n bin/devcore-project install/install.sh install/rollback.sh`, `shellcheck bin/devcore-project install/install.sh install/rollback.sh` and `git diff --check` passed for the corrected source. The new slot module has 64 tests.
+
+Hosted `checks` and `postgres-integration` passed for `24185615e86123021bc204053877b9bba8fc6d1a` in run `44060843847`. Docs-only head `9db52272415921154cce21d98e8e8153fec7eed9` passed `checks` but failed `postgres-integration` in run `44061972314`. All three cases failed during admin bootstrap with psql exit 2; no slot assertion ran. The old fixture discarded stderr, and the pulled image digest was not recorded, so the specific failed-run trigger remains unknown. Independent investigation confirmed the socket-readiness race in the official PostgreSQL 18.6 Alpine entrypoint: its temporary socket-only server is stopped before final startup. The fixture now requires authenticated TCP SELECT 1 and records redacted failure stderr plus limited container state. Two regressions failed before that correction and passed afterward. The CI-owned SQL helper now asserts its requested successful statements, including the synthetic legacy setup. New exact-head CI/OCR and independent review remain required after these source changes.
+
+Before the workstation metadata query, `mise exec -- devcore-project doctor` from the dirty NewYou worktree passed both DEV/TEST endpoint and owner authentication checks. The read-only query observed OID `4687800`, owner `new_you_test`, owner CONNECT true, PUBLIC CONNECT true, NOCREATEDB/NOSUPERUSER, zero memberships and no connected roles at that instant. No application table data was queried. The private mode-0600 receipt `/tmp/devcore-newyou-legacy-readonly-preflight.json` contains only target metadata, ACL and inspected container identity. Source `Postgres.check_endpoint` inspected the fixed TEST container and bound its immutable ID before `Postgres.execute` sent the catalog SELECT through stdin. No database, role, privilege, client, service or secret mutation occurred. This confirms the live activation prerequisite rather than granting permission to resolve it.
+
+A fresh `git fetch origin` still resolved main to base `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`; `gh api user --jq .login` returned JC-Agents. `git status --short` in the dirty NewYou worktree showed the same WELL-144 files. `ss -Hltn '( sport >= 4220 and sport <= 4240 )'` showed the existing listener at 4237. `lslocks --noheadings --output PID,TYPE,MODE,PATH | rg 'newyou-shared-test-plt.lock'` found no current holder. These are observations at that checkpoint, not reservations or permission to reclaim anything.
+
 ## Reviewable installation and rollback commands
 
 These commands are a proposed installation procedure for this exact source artifact. They have not run against the live workstation. Execute them only after independent source review and explicit owner installation authorization. If the reviewed source changes, recompute its checksum and use the newly approved artifact. Do not silently install a moving branch.
@@ -45,7 +59,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 2d116f1d20ab5c880fdb66f2842c60c5fb819047b0ee89f8cd28725cda1e146a
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```

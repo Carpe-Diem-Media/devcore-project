@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "0dbc5e73dde771371f46578d7649e91cd527329e",
+  "source_commit": "3e005d4aa94523d1bb82b7d7f2cdedfe2fcee66b",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "2d116f1d20ab5c880fdb66f2842c60c5fb819047b0ee89f8cd28725cda1e146a",
+  "executable_sha256": "0b2379987f9a47f38c27b8dadcb1f95187072d56b7235ef0e7a3f53c5fb351a2",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -77,6 +77,19 @@
         "exact ownership comments and OIDs",
         "same lease and generation"
       ]
+    },
+    {
+      "from": [
+        "preparing"
+      ],
+      "to": "free",
+      "owner": "Pool.acquire",
+      "guards": [
+        "typed ConnectionBoundaryError before credentials or any mutation",
+        "no resource creation",
+        "fresh generation and full preparation required on next claim"
+      ],
+      "side_effects": "static nonsecret diagnosis; no cleanup"
     },
     {
       "from": [
@@ -194,7 +207,8 @@
     "nested_environment": "verified descendant/job, registered origin profile, rebuilt binding, partial/declaration fallback rejected",
     "supplemental_profiles": "purge every declared name; inject active/all from canonical store; DEV imports only TEST database keys",
     "alternate_connection_variables": "rendered DATABASE_URL and PG aliases fail closed after merging",
-    "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback"
+    "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback",
+    "legacy_test_boundary": "Effective PUBLIC CONNECT on exact new_you_test must be false before credentials/role creation; existing ACL never changed automatically"
   },
   "lifetime": {
     "normal": "command lease or explicit canonical-worktree session",
@@ -224,7 +238,7 @@
       "symbols": [
         "PostgresIntegrationTests.test_managed_slot_databases_are_isolated_restricted_and_fresh_on_reuse"
       ],
-      "kind": "opt-in CI-owned PostgreSQL containers; synthetic committed rows, denied cross-slot connections, NOCREATEDB and fresh reuse"
+      "kind": "opt-in CI-owned PostgreSQL containers; synthetic committed rows, denied cross-slot connections, NOCREATEDB and fresh reuse; default legacy PUBLIC rejection before credentials/role creation and denied legacy connection after CI-only hardening"
     }
   ],
   "integration_contract": "docs/newyou-integration-contract.md",
@@ -246,6 +260,8 @@
     "does not isolate shared DEV",
     "does not implement NewYou PLT or application wiring",
     "not installed or activated by the source change",
-    "managed run all is explicitly unavailable; only dev/test profiles use slots"
-  ]
+    "managed run all is explicitly unavailable; only dev/test profiles use slots",
+    "workstation new_you_test currently permits PUBLIC CONNECT; separate exact-target ACL authorization and compatibility verification required before provisioning"
+  ],
+  "legacy_connection_proposal": "docs/activation/newyou-legacy-connect-proposal.md"
 }
