@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -656,6 +657,80 @@ class EnvironmentTests(unittest.TestCase):
         second = set((self.context.pool.root / "snapshots").iterdir())
         self.assertEqual(first, set(), "secret snapshots must be removed after loading")
         self.assertEqual(second, set())
+
+    def test_snapshot_renderer_waits_for_canonical_mutation_lock(self):
+        import fcntl
+        import hashlib
+        import threading
+        lock_path = self.fixture.mutation_lock_path(self.fixture.global_conf)
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        release = threading.Thread(target=lambda: (time.sleep(1.5), fcntl.flock(fd, fcntl.LOCK_UN)))
+        release.start()
+        try:
+            env = self.context.environment(self.lease, "test")
+        finally:
+            release.join()
+            os.close(fd)
+        self.assertEqual(env["TEST_DATABASE_NAME"], self.lease["database"])
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
+    def test_busy_renderer_reports_only_the_known_pre_mutation_diagnosis(self):
+        import fcntl
+        path = self.fixture.mutation_lock_path(self.fixture.global_conf)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with path.open("a+b") as lock:
+            path.chmod(0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            result = self.fixture.run_tool("render")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "ERROR: cannot acquire mutation lock: another DevCore mutation holds a state lock\n")
+
+    def test_renderer_wait_timeout_and_cancellation_remove_snapshots(self):
+        from unittest.mock import patch
+        busy = subprocess.CompletedProcess([], 1, "", "ERROR: cannot acquire mutation lock: another DevCore mutation holds a state lock\n")
+        with patch.object(self.m.subprocess, "run", return_value=busy), \
+             patch.object(self.m.time, "monotonic", side_effect=[0, 0, 30, 30]), \
+             patch.object(self.m.time, "sleep"):
+            with self.assertRaisesRegex(self.m.SlotError, "timed out"):
+                self.context.environment(self.lease, "test")
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+        with patch.object(self.m.subprocess, "run", return_value=busy), \
+             patch.object(self.m.time, "sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.context.environment(self.lease, "test")
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
+    def test_renderer_does_not_retry_unknown_or_partial_output_failures(self):
+        from unittest.mock import patch
+        for result in (subprocess.CompletedProcess([], 1, "", "synthetic-private-failure"),
+                       subprocess.CompletedProcess([], 1, "partial", "ERROR: cannot acquire mutation lock: another DevCore mutation holds a state lock\n")):
+            with patch.object(self.m.subprocess, "run", return_value=result) as run:
+                with self.assertRaisesRegex(self.m.SlotError, "rendering failed") as error:
+                    self.context.environment(self.lease, "test")
+                self.assertNotIn("synthetic-private", str(error.exception))
+                self.assertEqual(run.call_count, 1)
+            self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
+    def test_parallel_snapshot_preparation_preserves_distinct_bindings(self):
+        import threading
+        peer = self.context.pool.acquire(str(self.fixture.project))
+        with self.fixture.secrets.open("a") as secrets_file:
+            secrets_file.write(self.context.secrets.key(peer) + "=" + "b" * 64 + "\n")
+        barrier = threading.Barrier(2)
+        before = self.fixture.secrets.read_bytes()
+        def prepare(lease):
+            barrier.wait(timeout=5)
+            return self.context.environment(lease, "test")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            environments = list(executor.map(prepare, [self.lease, peer]))
+        self.assertEqual([value["TEST_DATABASE_NAME"] for value in environments], [self.lease["database"], peer["database"]])
+        self.assertNotEqual(environments[0]["TEST_DATABASE_USERNAME"], environments[1]["TEST_DATABASE_USERNAME"])
+        self.assertEqual(self.fixture.secrets.read_bytes(), before)
+        self.assertFalse((self.fixture.project / ".env.test").exists())
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
 
     def test_dev_environment_preserves_shared_dev_and_supplies_isolated_test_for_children(self):
         env = self.context.environment(self.lease, "dev")

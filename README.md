@@ -25,7 +25,7 @@ devcore-project run test -- <command>
 
 ## Managed NewYou slots
 
-Unreleased source version 1.2.0 adds opt-in automatic HTTP/TEST leases for NewYou. Existing v1 consumers keep their current behavior. The 20-slot pool uses ports 4221 through 4240 and fresh generation databases on the existing TEST PostgreSQL endpoint. Provisioning and cleanup require a verified owner approval for the exact bounded manifest; this branch is not installed or activated.
+Unreleased source version 1.2.1 provides opt-in automatic HTTP/TEST leases for NewYou, including bounded waiting during concurrent private-environment preparation. Existing v1 consumers keep their current behavior. The 20-slot pool uses ports 4221 through 4240 and fresh generation databases on the existing TEST PostgreSQL endpoint. Provisioning and cleanup require a verified owner approval for the exact bounded manifest. This patch has not been installed; the NewYou pilot and its remaining limitations are recorded in [WELL-154 verification](docs/activation/well-154-render-wait.md).
 
 Read [managed slots](docs/managed-slots.md), the [NewYou integration contract](docs/newyou-integration-contract.md), and the [requested target manifest](docs/activation/newyou-workstation-manifest.json). NewYou consumer wiring, real application/PLT proof and staged activation remain separate WELL-147 work.
 

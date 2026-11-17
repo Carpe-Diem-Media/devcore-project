@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "a5caa029a4bf4049ec6d5f51d4df15d07d23dee3",
-  "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a",
+  "source_commit": "3cf7634331593caf548880dc66f99cdbfe6a2d00",
+  "source_base": "1a46dcc54d3ac37fa554955e20c45555c0e08f5b",
+  "executable_sha256": "2ed9f8bba9abd3775b578bf159bb1c01787dac33cbbc668d71849752171916b7",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -229,7 +229,7 @@
     "children": "Linux subreaper and pidfds; HUP detach; INT/TERM signal verified descendants and wait through orphans",
     "supervisor_loss": "quarantine without reclaiming resources or heavy permits",
     "port_race": "pre-launch bind; immediate DEV listener inspection then at most four checks per second",
-    "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites",
+    "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites; up to 30 seconds total wait only for exact pre-mutation canonical state-lock contention",
     "failure": "retain private redacted logs/results and unavailable database",
     "capacity": "automatic heavy Mix classification; at most 2 permits; proven pre-launch failure frees permit, uncertain launch quarantines",
     "prelaunch_port_conflict": "idle lease retained with diagnosis; exact retry/release allowed; active job and unknown listener untouched",
@@ -278,7 +278,10 @@
     "does not implement NewYou PLT or application wiring",
     "not installed or activated by the source change",
     "managed run all is explicitly unavailable; only dev/test profiles use slots",
-    "workstation new_you_test currently permits PUBLIC CONNECT; separate exact-target ACL authorization and compatibility verification required before provisioning"
+    "workstation new_you_test PUBLIC CONNECT was separately revoked under exact guarded authorization; owner CONNECT was preserved and doctor passed. Managed-role denial remains part of the unfinished NewYou live pilot"
   ],
-  "legacy_connection_proposal": "docs/activation/newyou-legacy-connect-proposal.md"
+  "legacy_connection_proposal": "docs/activation/newyou-legacy-connect-proposal.md",
+  "source_version": "1.2.1",
+  "maintenance_issue": "WELL-154",
+  "maintenance_verification": "docs/activation/well-154-render-wait.md"
 }
