@@ -203,7 +203,7 @@
     "port_race": "pre-launch bind; immediate DEV listener inspection then at most four checks per second",
     "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites",
     "failure": "retain private redacted logs/results and unavailable database",
-    "capacity": "automatic heavy Mix classification; at most2 permits; proven pre-launch failure frees permit, uncertain launch quarantines"
+    "capacity": "automatic heavy Mix classification; at most 2 permits; proven pre-launch failure frees permit, uncertain launch quarantines"
   },
   "tests": [
     {
