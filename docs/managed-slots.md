@@ -92,6 +92,13 @@ Managed rendering uses private immutable snapshots and the existing DevCore rend
 
 Each managed job retains a private output log and structured result under the registry's `runs/JOB` directory before cleanup. Known project and generation secrets are redacted across output chunk boundaries. Treat application output as potentially sensitive. Do not routinely publish logs or participant data. The tool preserves diagnostic records and generated secret entries; it does not implement their automatic retention purge. A failed run keeps its database unavailable until explicit release.
 
+Managed snapshot rendering waits up to 30 seconds only when the existing renderer
+returns the exact pre-mutation state-lock contention diagnosis with no stdout.
+Every attempt still acquires the canonical locks. Other failures stop immediately;
+timeout or cancellation removes the private snapshot and preserves the allocation.
+The lock is held only for rendering. It does not serialize managed child jobs or
+database suites. Direct legacy mutation commands retain nonblocking admission.
+
 ## Capacity and remaining proof
 
 On 2026-11-17, the workstation reported 24 logical CPUs and 33,562,959,872 bytes of RAM. The provisional heavy cap is `max(1, min(2, cpus / 4, total_memory / 8 GiB))`, rounded down. This gives two heavy jobs on that host. Capacity permits persist with lease/generation identity; supervisor loss cannot silently release them to a new heavy job. A provably pre-launch failure returns its heavy permit; a failed launch is retained without an active job. Once launch ownership is uncertain, the permit is quarantined and needs reviewed reconciliation. Waiting for heavy capacity is bounded to 3600 seconds and can be interrupted. It is a conservative configuration bound, not a measured guarantee for two full NewYou suites. WELL-147 must measure peak memory and actual suite/build behavior before activation, accounting for other active work. Database slots do not globally serialize focused tests, and the heavy gate is not a PLT lock.

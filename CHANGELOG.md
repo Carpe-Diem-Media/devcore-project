@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1, unreleased
+
+- Wait up to 30 seconds for the exact pre-mutation lock-contention outcome when
+  rendering a managed command's private environment. Legacy mutation commands
+  retain their nonblocking admission; unknown failures are never retried.
+- Close the mutation-lock directory descriptor once, preserving the static busy
+  diagnosis instead of masking it with a bad-descriptor traceback.
+- Add temporary-resource contention, parallel binding, timeout, cancellation and
+  negative tests. Allocation, cleanup targets and the approved manifest are unchanged.
+
 ## 1.2.0, unreleased
 
 - Add opt-in NewYou slots 01 through 20, HTTP ports 4221 through 4240, atomic private leases and fresh TEST database/role generations.
