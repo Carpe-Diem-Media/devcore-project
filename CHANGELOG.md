@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0, unreleased
+
+- Add opt-in NewYou slots 01 through 20, HTTP ports 4221 through 4240, atomic private leases and fresh TEST database/role generations.
+- Add least-privilege administrative provisioning, exact ownership/client cleanup guards, verified owner manifest approval, retained failures and conservative crash quarantine.
+- Reuse the existing renderer for command-local environments, supervise descendants, redact known secrets and bound heavy Mix concurrency separately from focused tests.
+- Document the separate NewYou integration, PLT/application proof, activation and rollback obligations. No workstation installation, existing database reset, release publication or activation is part of this source change.
+
 ## 1.1.0 (released 2026-10-23)
 
 Backward-compatible contract extension for explicit supplemental-secret delivery.

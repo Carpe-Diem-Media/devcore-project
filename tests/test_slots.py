@@ -1,0 +1,690 @@
+"""Slot tests use temporary metadata and adapters, never workstation databases."""
+import concurrent.futures
+import copy
+import json
+import os
+import socket
+import subprocess
+import tempfile
+import types
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / "bin" / "devcore-project"
+BEGIN = "# DEVCORE_SLOTS_PYTHON_BEGIN\n"
+END = "# DEVCORE_SLOTS_PYTHON_END"
+
+
+def module():
+    source = TOOL.read_text()
+    if BEGIN not in source:
+        return None
+    result = types.ModuleType("devcore_slots")
+    exec(compile(source.split(BEGIN, 1)[1].split(END, 1)[0], str(TOOL), "exec"), result.__dict__)
+    return result
+
+
+def approve_for_test(digest, reference):
+    return {"author": "JCSchoeman96", "synthetic": True}
+
+
+class Resources:
+    def __init__(self):
+        self.created = {}
+        self.dropped = []
+        self.fail_create = False
+        self.fail_clean = False
+        self.clients = set()
+
+    def prepare(self, lease):
+        if self.fail_create:
+            raise RuntimeError("injected preparation failure")
+        self.created[lease["database"]] = lease["generation"]
+        return {"database_oid": 1000 + lease["slot"], "role_oid": 2000 + lease["slot"]}
+
+    def cleanup(self, lease):
+        if self.fail_clean or lease["database"] in self.clients:
+            raise RuntimeError("clients remain or cleanup failed")
+        assert self.created[lease["database"]] == lease["generation"]
+        self.dropped.append(lease["database"])
+        del self.created[lease["database"]]
+
+
+class SlotTests(unittest.TestCase):
+    def setUp(self):
+        self.m = module()
+        self.assertIsNotNone(self.m, "managed slot allocator is missing")
+        self.temp = tempfile.TemporaryDirectory(prefix="devcore-slots-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.resources = Resources()
+        self.contract = self.m.newyou_contract()
+        self.pool = self.m.Pool(self.root / "pool", self.contract, self.resources,
+                                port_available=lambda port: True, approval_check=approve_for_test)
+        self.pool.enable(self.pool.manifest_digest(), "synthetic-owner-authorization")
+        self.worktree = str(self.root)
+
+    def claim(self):
+        return self.pool.acquire(self.worktree)
+
+    def release(self, lease):
+        return self.pool.release(lease["lease_id"], lease["generation"], self.worktree)
+
+    def test_twenty_concurrent_claims_and_exhaustion(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            leases = list(executor.map(lambda _: self.claim(), range(20)))
+        self.assertEqual({x["slot"] for x in leases}, set(range(1, 21)))
+        for key in ("lease_id", "generation", "port", "database", "role"):
+            self.assertEqual(len({x[key] for x in leases}), 20, key)
+        self.assertEqual({x["port"] for x in leases}, set(range(4221, 4241)))
+        with self.assertRaisesRegex(self.m.SlotError, "exhausted"):
+            self.claim()
+
+    def test_release_and_reuse_have_fresh_database_generation(self):
+        old = self.claim()
+        self.release(old)
+        new = self.claim()
+        self.assertEqual(old["slot"], new["slot"])
+        self.assertNotEqual(old["generation"], new["generation"])
+        self.assertNotEqual(old["database"], new["database"])
+        with self.assertRaisesRegex(self.m.SlotError, "stale"):
+            self.release(old)
+        self.assertEqual(self.pool.status()[0]["lease_id"], new["lease_id"])
+
+    def test_wrong_worktree_or_generation_cannot_release(self):
+        lease = self.claim()
+        for generation, worktree in (("bad", self.worktree), (lease["generation"], "/tmp")):
+            with self.assertRaises(self.m.SlotError):
+                self.pool.release(lease["lease_id"], generation, worktree)
+        self.assertEqual(self.resources.dropped, [])
+
+    def test_duplicate_release_is_idempotent_until_slot_reused(self):
+        lease = self.claim()
+        self.release(lease)
+        self.release(lease)
+        self.assertEqual(self.resources.dropped, [lease["database"]])
+
+    def test_port_conflict_skips_without_signalling(self):
+        self.pool.port_available = lambda port: port != 4221
+        self.assertEqual(self.claim()["slot"], 2)
+
+    def test_cleanup_failure_quarantines(self):
+        lease = self.claim()
+        self.resources.fail_clean = True
+        with self.assertRaisesRegex(self.m.SlotError, "quarantined"):
+            self.release(lease)
+        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+        self.assertEqual(self.claim()["slot"], 2)
+
+    def test_remaining_clients_prevent_reuse(self):
+        lease = self.claim()
+        self.resources.clients.add(lease["database"])
+        with self.assertRaises(self.m.SlotError):
+            self.release(lease)
+        self.assertEqual(self.resources.dropped, [])
+
+    def test_preparation_failure_is_quarantined_never_adopted(self):
+        self.resources.fail_create = True
+        with self.assertRaises(self.m.SlotError):
+            self.claim()
+        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+        self.assertEqual(self.resources.dropped, [])
+
+    def test_retention_and_explicit_release(self):
+        lease = self.claim()
+        self.pool.retain(lease["lease_id"], lease["generation"], self.worktree)
+        self.assertEqual(self.pool.status()[0]["state"], "retained")
+        self.assertEqual(self.claim()["slot"], 2)
+        self.release(lease)
+
+    def test_live_job_blocks_release_and_recovery(self):
+        lease = self.claim()
+        job = self.pool.begin_job(lease["lease_id"], lease["generation"], self.worktree)
+        with self.assertRaisesRegex(self.m.SlotError, "managed job"):
+            self.release(lease)
+        self.pool.recover()
+        self.assertEqual(self.pool.status()[0]["state"], "in_use")
+        self.pool.end_job(lease["lease_id"], lease["generation"], self.worktree, job, 0)
+        self.release(lease)
+
+    def test_dead_supervisor_quarantines_never_reclaims(self):
+        lease = self.claim()
+        self.pool.begin_job(lease["lease_id"], lease["generation"], self.worktree)
+        self.pool.process_alive = lambda identity: False
+        self.pool.recover()
+        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+        with self.assertRaises(self.m.SlotError):
+            self.release(lease)
+        self.assertEqual(self.resources.dropped, [])
+
+    def test_failed_job_is_retained(self):
+        lease = self.claim()
+        job = self.pool.begin_job(lease["lease_id"], lease["generation"], self.worktree)
+        self.pool.end_job(lease["lease_id"], lease["generation"], self.worktree, job, 1)
+        row = self.pool.status()[0]
+        self.assertEqual(row["state"], "retained")
+        self.assertEqual(row["last_exit"], 1)
+
+    def test_manifest_authorization_is_required_and_bound(self):
+        pool = self.m.Pool(self.root / "disabled", self.contract, self.resources)
+        with self.assertRaisesRegex(self.m.SlotError, "authorization"):
+            pool.acquire(self.worktree)
+        with self.assertRaises(self.m.SlotError):
+            pool.enable("wrong", "not-an-approval")
+        altered = copy.deepcopy(self.contract)
+        altered["test_port"] = 55432
+        with self.assertRaises(self.m.SlotError):
+            self.m.Pool(self.root / "invalid", altered, self.resources)
+
+    def test_protected_or_tampered_target_refuses_cleanup(self):
+        lease = self.claim()
+        with self.pool.registry() as state:
+            state["slots"]["1"]["database"] = "new_you_test"
+        with self.assertRaises(self.m.SlotError):
+            self.release(lease)
+        self.assertEqual(self.resources.dropped, [])
+
+    def test_private_metadata_and_symlink_rejection(self):
+        lease = self.claim()
+        self.assertEqual(self.pool.root.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.pool.root / "registry.json").stat().st_mode & 0o777, 0o600)
+        link = self.root / "link"
+        link.symlink_to(self.pool.root)
+        with self.assertRaises(self.m.SlotError):
+            self.m.Pool(link, self.contract, self.resources)
+        self.release(lease)
+
+    def test_wait_is_bounded_and_cancelled_without_shared_fallback(self):
+        for _ in range(20):
+            self.claim()
+        with self.assertRaisesRegex(self.m.SlotError, "exhausted"):
+            self.pool.acquire(self.worktree, wait=0.01)
+        with self.assertRaisesRegex(self.m.SlotError, "cancelled"):
+            self.pool.acquire(self.worktree, wait=1, cancelled=lambda: True)
+
+    def test_retry_cleanup_after_clients_leave_keeps_same_exact_target(self):
+        lease = self.claim()
+        self.resources.fail_clean = True
+        with self.assertRaises(self.m.SlotError):
+            self.release(lease)
+        self.resources.fail_clean = False
+        self.pool.release(lease["lease_id"], lease["generation"], self.worktree, retry=True)
+        self.assertEqual(self.pool.status()[0]["state"], "free")
+
+    def test_disabling_acquisition_preserves_existing_leases_and_cleanup(self):
+        lease = self.claim()
+        self.pool.disable()
+        with self.assertRaisesRegex(self.m.SlotError, "disabled"):
+            self.claim()
+        self.assertEqual(self.pool.status()[0]["state"], "ready")
+        self.release(lease)
+
+    def test_real_socket_bind_conflict(self):
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            self.assertFalse(self.m.port_available(held.getsockname()[1]))
+
+    def test_interrupted_preparation_and_cleanup_are_quarantined_without_deletion(self):
+        for state_name, owner_key in (("preparing", "preparer"), ("cleaning", "cleaner")):
+            lease = self.claim()
+            with self.pool.registry() as state:
+                row = state["slots"][str(lease["slot"])]
+                row["state"] = state_name
+                row[owner_key] = {"pid": 999999999, "start": "0", "boot": "old-boot"}
+            self.pool.recover()
+            self.assertEqual(self.pool.status()[lease["slot"] - 1]["state"], "quarantined")
+        self.assertEqual(self.resources.dropped, [])
+
+
+class PostgresAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.m = module()
+        self.assertTrue(hasattr(self.m, "Postgres"), "managed PostgreSQL adapter is missing")
+        self.temp = tempfile.TemporaryDirectory(prefix="devcore-slot-pg-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.resources = Resources()
+        self.pool = self.m.Pool(self.root / "pool", self.m.newyou_contract(), self.resources, approval_check=approve_for_test)
+        self.pool.enable(self.pool.manifest_digest(), "synthetic-approval")
+        self.lease = self.pool.acquire(str(self.root))
+        self.statements = []
+        self.catalog = {"database_oid": 1001, "role_oid": 2001, "owner_oid": 2001,
+                        "database_comment": self.m.ownership_comment(self.lease),
+                        "role_comment": self.m.ownership_comment(self.lease),
+                        "clients": 0, "privileged": False, "memberships": 0, "other_databases": 0}
+        self.adapter = self.m.Postgres(self.m.newyou_contract(), lambda row: "synthetic_password",
+                                      executor=self.sql, endpoint=lambda: "a" * 64)
+
+    def sql(self, statement):
+        self.statements.append(statement)
+        if "json_build_object" in statement:
+            return json.dumps(self.catalog)
+        if "EXISTS" in statement and "pg_database" in statement:
+            return "f"
+        if "count(*)" in statement:
+            return "0"
+        return ""
+
+    def test_prepare_uses_only_new_exact_targets_and_restricted_roles(self):
+        catalog = self.adapter.prepare(self.lease)
+        sql = "\n".join(self.statements)
+        self.assertIn("NOCREATEDB", sql)
+        self.assertIn("NOSUPERUSER", sql)
+        self.assertIn("NOCREATEROLE", sql)
+        self.assertIn("NOBYPASSRLS", sql)
+        self.assertIn("REVOKE ALL", sql)
+        self.assertIn("ALLOW_CONNECTIONS false", sql)
+        self.assertNotIn("ALTER ROLE new_you_test", sql)
+        self.assertEqual(catalog["container_id"], "a" * 64)
+
+    def test_existing_identity_is_never_adopted(self):
+        self.adapter.executor = lambda sql: "t"
+        with self.assertRaisesRegex(self.m.SlotError, "already exists"):
+            self.adapter.prepare(self.lease)
+
+    def test_cleanup_checks_exact_catalog_and_never_forces(self):
+        self.lease["catalog"]["container_id"] = "a" * 64
+        self.adapter.cleanup(self.lease)
+        sql = "\n".join(self.statements)
+        self.assertIn("DROP DATABASE", sql)
+        self.assertIn("ALLOW_CONNECTIONS false", sql)
+        self.assertIn("NOLOGIN", sql)
+        self.assertNotIn("FORCE", sql)
+        self.assertNotIn("pg_terminate_backend", sql)
+
+    def test_cleanup_rejects_every_ownership_mismatch_before_mutation(self):
+        self.lease["catalog"]["container_id"] = "a" * 64
+        for key, bad in (("database_oid", 9), ("role_oid", 9), ("owner_oid", 9),
+                         ("database_comment", "foreign"), ("role_comment", "foreign"),
+                         ("clients", 1), ("privileged", True), ("memberships", 1), ("other_databases", 1)):
+            with self.subTest(key=key):
+                old = self.catalog[key]
+                self.catalog[key] = bad
+                self.statements.clear()
+                with self.assertRaises(self.m.SlotError):
+                    self.adapter.cleanup(self.lease)
+                self.assertFalse(any("DROP " in x or "ALTER " in x for x in self.statements))
+                self.catalog[key] = old
+
+    def test_protected_names_and_endpoint_replacement_are_rejected(self):
+        for database in ("new_you_dev", "new_you_test", "postgres", "template0", "template1", "dc_new_you_s01_unregistered"):
+            row = copy.deepcopy(self.lease)
+            row["database"] = database
+            with self.assertRaises(self.m.SlotError):
+                self.adapter.prepare(row)
+            self.assertEqual(self.statements, [])
+        self.lease["catalog"]["container_id"] = "b" * 64
+        with self.assertRaises(self.m.SlotError):
+            self.adapter.cleanup(self.lease)
+        self.assertEqual(self.statements, [])
+
+
+class CommandTests(unittest.TestCase):
+    def setUp(self):
+        self.m = module()
+        self.assertTrue(hasattr(self.m, "managed_run"), "managed command supervisor is missing")
+        self.temp = tempfile.TemporaryDirectory(prefix="devcore-slot-command-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.pool = self.m.Pool(self.root / "pool", self.m.newyou_contract(), Resources(),
+                                port_available=lambda _: True, approval_check=approve_for_test)
+        self.pool.enable(self.pool.manifest_digest(), "synthetic-approval")
+        self.lease = self.pool.acquire(str(self.root))
+
+    def test_command_inherits_identity_and_success_cleans_only_its_generation(self):
+        output = self.root / "observed.json"
+        command = ["python3", "-c", "import os,json,sys;json.dump({k:os.getenv(k) for k in "
+                   "['DEVCORE_SLOT_LEASE','DEVCORE_SLOT_GENERATION','DEVCORE_SLOT_JOB','NEW_YOU_PORT']},open(sys.argv[1],'w'))", str(output)]
+        code = self.m.managed_run(self.pool, self.lease, command, os.environ.copy())
+        self.assertEqual(code, 0)
+        row = json.loads(output.read_text())
+        self.assertEqual(row["DEVCORE_SLOT_LEASE"], self.lease["lease_id"])
+        self.assertEqual(row["DEVCORE_SLOT_GENERATION"], self.lease["generation"])
+        self.assertEqual(row["NEW_YOU_PORT"], str(self.lease["port"]))
+        self.assertTrue(row["DEVCORE_SLOT_JOB"])
+        self.assertEqual(self.pool.status()[0]["state"], "free")
+
+    def test_failing_command_retains_redacted_diagnosis(self):
+        code = self.m.managed_run(self.pool, self.lease,
+                                 ["python3", "-c", "import sys;print('synthetic_secret');sys.exit(7)"],
+                                 os.environ.copy(), redact=["synthetic_secret"])
+        self.assertEqual(code, 7)
+        row = self.pool.status()[0]
+        self.assertEqual(row["state"], "retained")
+        output = next((self.pool.root / "runs").glob("*/output.log"))
+        self.assertNotIn("synthetic_secret", output.read_text())
+        self.assertIn("[REDACTED]", output.read_text())
+
+    def test_supervisor_waits_for_orphan_grandchild(self):
+        output = self.root / "late-child"
+        # Exercise subreaping in a separate supervisor process, not in the unittest runner.
+        runner = self.root / "run.py"
+        runner.write_text("from pathlib import Path\nimport types,os\n"
+            f"source=Path({str(TOOL)!r}).read_text().split({BEGIN!r},1)[1].split({END!r},1)[0]\n"
+            "m=types.ModuleType('slots');exec(source,m.__dict__)\n"
+            f"pool=m.Pool(Path({str(self.pool.root)!r}),m.newyou_contract(),None)\n"
+            f"lease=pool.status()[0]\n"
+            f"command=['python3','-c',\"import os,time;pid=os.fork();"
+            f"os._exit(0) if pid else None;os.setsid();time.sleep(0.15);open({str(output)!r},'w').write('done')\"]\n"
+            "raise SystemExit(m.managed_run(pool,lease,command,os.environ.copy(),auto_release=False,heavy=True))\n")
+        result = subprocess.run(["python3", str(runner)], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(output.exists())
+        self.assertEqual(self.pool.status()[0]["state"], "ready")
+
+    def test_port_becoming_occupied_before_launch_quarantines(self):
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", self.lease["port"]))
+            with self.assertRaises(self.m.SlotError):
+                self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy())
+        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+
+    def test_cli_has_opt_in_commands_without_changing_installed_tool(self):
+        result = subprocess.run([str(TOOL), "slots", "--help"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("manifest", result.stdout)
+        self.assertIn("recover", result.stdout)
+
+
+class EnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_devcore import DevCoreProjectFixture
+        from unittest.mock import patch
+        self.fixture = DevCoreProjectFixture()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.m = module()
+        f = self.fixture
+        conf = f.project / ".devcore/project.conf"
+        conf.write_text(conf.read_text().replace("demo", "new_you").replace("DEMO", "NEW_YOU").replace("TEST_ROLE_CREATEDB=yes", "TEST_ROLE_CREATEDB=no") + "SLOT_POOL=.devcore/slots.json\n")
+        f.secrets.write_text(f.secrets.read_text().replace("DEMO", "NEW_YOU"))
+        global_text = f.global_conf.read_text().replace("PG_TEST_CONTAINER=devcore-test-test", "PG_TEST_CONTAINER=dev-core-postgres-test-1")
+        global_text = global_text.replace("PG_ADMIN_ROLE=devcore_test_admin", "PG_ADMIN_ROLE=devcore_admin")
+        f.global_conf.write_text(global_text)
+        (f.project / ".devcore/slots.json").write_text(json.dumps(self.m.newyou_contract()))
+        self.patch = patch.dict(os.environ, f.env(), clear=True)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.old_cwd = os.getcwd()
+        os.chdir(f.project)
+        self.addCleanup(os.chdir, self.old_cwd)
+        self.context = self.m.SlotContext(str(TOOL), conf, f.global_conf, f.secrets, f.central)
+        self.context.pool.resources = Resources()
+        self.context.pool.approval_check = approve_for_test
+        self.context.pool.enable(self.context.pool.manifest_digest(), "synthetic-approval")
+        self.lease = self.context.pool.acquire(str(f.project))
+        with f.secrets.open("a") as stream:
+            stream.write(self.context.secrets.key(self.lease) + "=" + "a" * 64 + "\n")
+
+    def test_existing_renderer_gets_private_per_command_snapshots(self):
+        before = self.fixture.secrets.read_bytes()
+        env = self.context.environment(self.lease, "test")
+        self.assertEqual(env["TEST_DATABASE_NAME"], self.lease["database"])
+        self.assertEqual(env["TEST_DATABASE_USERNAME"], self.lease["role"])
+        self.assertEqual(env["TEST_DATABASE_PASSWORD"], "a" * 64)
+        self.assertNotIn("DEV_DATABASE_PASSWORD", env)
+        self.assertEqual(env["MIX_ENV"], "test")
+        self.assertEqual(self.fixture.secrets.read_bytes(), before)
+        self.assertFalse((self.fixture.project / ".env.test").exists())
+        first = set((self.context.pool.root / "snapshots").iterdir())
+        self.context.environment(self.lease, "test")
+        second = set((self.context.pool.root / "snapshots").iterdir())
+        self.assertEqual(first, set(), "secret snapshots must be removed after loading")
+        self.assertEqual(second, set())
+
+    def test_dev_environment_preserves_shared_dev_and_supplies_isolated_test_for_children(self):
+        env = self.context.environment(self.lease, "dev")
+        self.assertEqual(env["DEV_DATABASE_NAME"], "new_you_dev")
+        self.assertEqual(env["TEST_DATABASE_NAME"], self.lease["database"])
+        self.assertEqual(env["MIX_ENV"], "dev")
+
+    def test_arbitrary_parent_pg_values_and_build_overrides_fail_closed(self):
+        os.environ.update(DATABASE_URL="ignored-parent-value", PGDATABASE="new_you_test")
+        env = self.context.environment(self.lease, "test")
+        self.assertNotIn("DATABASE_URL", env)
+        self.assertNotIn("PGDATABASE", env)
+        os.environ["MIX_BUILD_PATH"] = "/tmp/shared-build"
+        with self.assertRaises(self.m.SlotError):
+            self.context.environment(self.lease, "test")
+        os.environ.pop("MIX_BUILD_PATH")
+        os.environ["MIX_TEST_PARTITION"] = "1"
+        with self.assertRaises(self.m.SlotError):
+            self.context.environment(self.lease, "test")
+
+    def test_live_child_verifier_and_nested_compatible_run(self):
+        env = self.context.environment(self.lease, "test")
+        output = self.fixture.root / "verified.json"
+        child = ["python3", "-c", "import os,subprocess,sys;result=subprocess.run([sys.argv[1],'slots','verify','--lease',os.environ['DEVCORE_SLOT_LEASE'],'--generation',os.environ['DEVCORE_SLOT_GENERATION'],'--job',os.environ['DEVCORE_SLOT_JOB']],capture_output=True,text=True);open(sys.argv[2],'w').write(result.stdout);sys.exit(result.returncode)", str(TOOL), str(output)]
+        self.assertEqual(self.m.managed_run(self.context.pool, self.lease, child, env, auto_release=False), 0)
+        self.assertEqual(json.loads(output.read_text())["database"], self.lease["database"])
+        self.assertEqual(self.context.pool.status()[0]["state"], "ready")
+
+    def test_verifier_rejects_non_child_and_stale_identity(self):
+        with self.assertRaises(self.m.SlotError):
+            self.m.verify_job(self.context.pool, self.lease["lease_id"], self.lease["generation"], "absent", str(self.fixture.project))
+
+    def test_valid_local_build_override_is_preserved(self):
+        os.environ["MIX_BUILD_PATH"] = str(self.fixture.project / "alternate-build")
+        env = self.context.environment(self.lease, "test")
+        self.assertEqual(env["MIX_BUILD_PATH"], os.environ["MIX_BUILD_PATH"])
+
+    def test_secret_generation_does_not_touch_existing_credentials_or_use_argv(self):
+        row = dict(self.lease, generation="b" * 32)
+        before = self.fixture.secrets.read_text()
+        password = self.context.secrets.create(row)
+        self.assertEqual(len(password), 64)
+        self.assertTrue(self.fixture.secrets.read_text().startswith(before))
+        self.assertEqual(self.context.secrets.existing(row), password)
+        with self.assertRaises(self.m.SlotError):
+            self.context.secrets.create(row)
+
+
+    def test_automatic_cli_and_nested_run_keep_managed_identity_and_stdin(self):
+        f = self.fixture
+        docker = f.mock_bin / "docker"
+        docker.write_text("#!/usr/bin/env python3\n" + r'''
+import hashlib,json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+if args[0]=='inspect':
+    print('a'*64 if '{{.Id}}' in args else 'true')
+elif args[0]=='port':
+    print('127.0.0.1:55433')
+elif args[0]=='exec':
+    sql=sys.stdin.read()
+    if 'json_build_object' in sql:
+        rows=json.loads(Path(os.environ['MOCK_SLOT_REGISTRY']).read_text())['slots'].values()
+        row=next(row for row in rows if row['database'] in sql)
+        comment='devcore-slot:v1:new_you:'+row['lease_id']+':'+row['generation']+':'+hashlib.sha256(row['worktree'].encode()).hexdigest()+':'+row['manifest']
+        print(json.dumps(dict(database_oid=1000+row['slot'],role_oid=2000+row['slot'],owner_oid=2000+row['slot'],database_comment=comment,role_comment=comment,clients=0,privileged=False,memberships=0,other_databases=0)))
+    elif 'EXISTS' in sql:
+        print('f')
+else:
+    sys.exit(1)
+''')
+        docker.chmod(0o700)
+        env = f.env()
+        env.update(PATH=str(f.mock_bin) + os.pathsep + os.environ['PATH'],
+                   MOCK_SLOT_REGISTRY=str(self.context.pool.root / "registry.json"))
+        output = f.root / "automatic.json"
+        script = ("import os,sys,json,subprocess; "
+                  "observed={'database':os.environ['TEST_DATABASE_NAME'],'stdin':sys.stdin.read()}; "
+                  "nested=subprocess.run([sys.argv[1],'run','test','--','python3','-c',"
+                  "'import os;print(os.environ[\"TEST_DATABASE_NAME\"])'],capture_output=True,text=True); "
+                  "observed['nested']=nested.stdout.strip();observed['nested_exit']=nested.returncode; "
+                  "json.dump(observed,open(sys.argv[2],'w'))")
+        result = subprocess.run([str(TOOL), "run", "test", "--", "python3", "-c", script, str(TOOL), str(output)],
+                                cwd=f.project, env=env, input="synthetic-stdin", capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(output.read_text())
+        self.assertNotEqual(observed["database"], "new_you_test")
+        self.assertEqual(observed["nested"], observed["database"])
+        self.assertEqual(observed["nested_exit"], 0)
+        self.assertEqual(observed["stdin"], "synthetic-stdin")
+        self.assertEqual(self.context.pool.status()[1]["state"], "free")
+
+
+class ActivationTests(unittest.TestCase):
+    def test_reviewable_manifest_matches_source_without_activating_anything(self):
+        m = module()
+        requested = json.loads((ROOT / "docs/activation/newyou-workstation-manifest.json").read_text())
+        pool = m.Pool.__new__(m.Pool)
+        pool.root = Path(requested["manifest"]["registry"])
+        pool.contract = m.newyou_contract()
+        self.assertEqual(requested["manifest"], pool.manifest())
+        self.assertEqual(requested["sha256"], pool.manifest_digest())
+        self.assertEqual(requested["authorization_status"], "NOT_AUTHORIZED")
+
+    def test_local_reference_is_not_owner_authorization(self):
+        m = module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            pool = m.Pool(root / "pool", m.newyou_contract(), Resources())
+            with self.assertRaisesRegex(m.SlotError, "owner"):
+                pool.enable(pool.manifest_digest(), "self-issued-reference")
+
+    def test_postgres_sql_uses_the_inspected_container_id(self):
+        from unittest.mock import patch
+        m = module()
+        adapter = m.Postgres(m.newyou_contract(), lambda row: "synthetic")
+        adapter.bound_container = "a" * 64
+        observed = []
+        def run(args, **kwargs):
+            observed.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with patch.object(m.subprocess, "run", run):
+            adapter.execute("SELECT 1;")
+        self.assertEqual(observed[0][3], "a" * 64)
+
+
+def claim_in_process(arguments):
+    root, worktree = arguments
+    m = module()
+    pool = m.Pool(Path(root), m.newyou_contract(), Resources(), port_available=lambda _: True)
+    return pool.acquire(worktree)
+
+
+class MultiprocessTests(unittest.TestCase):
+    def test_twenty_processes_from_distinct_worktrees_claim_once(self):
+        import multiprocessing
+        m = module()
+        with tempfile.TemporaryDirectory(prefix="devcore-20-claims-") as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            pool = m.Pool(root / "pool", m.newyou_contract(), Resources(),
+                          port_available=lambda _: True, approval_check=approve_for_test)
+            pool.enable(pool.manifest_digest(), "synthetic-owner-approval")
+            worktrees = [root / f"worktree-{i}" for i in range(20)]
+            for path in worktrees:
+                path.mkdir()
+            with concurrent.futures.ProcessPoolExecutor(max_workers=20,
+                    mp_context=multiprocessing.get_context("fork")) as executor:
+                leases = list(executor.map(claim_in_process, [(str(pool.root), str(path)) for path in worktrees]))
+            for key in ("slot", "port", "database", "role", "lease_id", "generation", "worktree"):
+                self.assertEqual(len({row[key] for row in leases}), 20, key)
+            self.assertTrue(all(row["state"] == "ready" for row in pool.status()))
+
+    def test_killed_supervisor_leaves_live_child_and_quarantines(self):
+        import signal
+        import time
+        m = module()
+        with tempfile.TemporaryDirectory(prefix="devcore-supervisor-loss-") as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            pool = m.Pool(root / "pool", m.newyou_contract(), Resources(),
+                          port_available=lambda _: True, approval_check=approve_for_test)
+            pool.enable(pool.manifest_digest(), "synthetic-owner-approval")
+            lease = pool.acquire(str(root))
+            marker, started = root / "child-survived", root / "child-started"
+            runner = root / "runner.py"
+            runner.write_text("from pathlib import Path\nimport types,os\n"
+                f"source=Path({str(TOOL)!r}).read_text().split({BEGIN!r},1)[1].split({END!r},1)[0]\n"
+                "m=types.ModuleType('slots');exec(source,m.__dict__)\n"
+                f"pool=m.Pool(Path({str(pool.root)!r}),m.newyou_contract(),None)\n"
+                "lease=pool.status()[0]\n"
+                f"command=['python3','-c',\"import time;open({str(started)!r},'w').close();time.sleep(0.4);open({str(marker)!r},'w').write('alive')\"]\n"
+                "m.managed_run(pool,lease,command,os.environ.copy(),auto_release=False,heavy=True)\n")
+            process = subprocess.Popen(["python3", str(runner)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while not started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(started.exists())
+                process.send_signal(signal.SIGKILL)
+                process.wait(timeout=2)
+                pool.recover()
+                self.assertEqual(pool.status()[0]["state"], "quarantined")
+                with self.assertRaises(m.SlotError):
+                    pool.release(lease["lease_id"], lease["generation"], str(root))
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(marker.exists(), "supervisor loss must not terminate a live child")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+
+
+class OwnerApprovalTests(unittest.TestCase):
+    def test_heavy_detection_includes_full_suite_flags_but_excludes_focused_tests(self):
+        m = module()
+        self.assertTrue(hasattr(m, "is_heavy_command"), "automatic heavy command classification is missing")
+        for command in (["mix", "check"], ["mix", "check.deep"], ["mix", "test"],
+                        ["mix", "test", "--seed", "123"], ["mix", "compile"]):
+            self.assertTrue(m.is_heavy_command(command), command)
+        for command in (["mix", "test", "test/new_you/local_config_test.exs:10"],
+                        ["mix", "test", "test/new_you"], ["mix", "test", "--only", "focused"]):
+            self.assertFalse(m.is_heavy_command(command), command)
+
+    def test_uncertain_heavy_permit_cannot_be_reused_by_a_later_job(self):
+        m = module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            owner = {"lease_id": "a" * 32, "generation": "b" * 32}
+            with m.concurrency_gate(root, "heavy", 1, owner=owner, wait=0.01):
+                pass
+            with self.assertRaisesRegex(m.SlotError, "capacity"):
+                with m.concurrency_gate(root, "heavy", 1, owner=owner, wait=0.01):
+                    self.fail("uncertain heavy capacity was reassigned")
+
+    def test_completed_heavy_permit_is_reusable(self):
+        m = module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            owner = {"lease_id": "a" * 32, "generation": "b" * 32}
+            for _ in range(2):
+                with m.concurrency_gate(root, "heavy", 1, owner=owner, wait=0.01) as permit:
+                    permit["complete"] = True
+
+    def test_only_exact_owner_comment_authorizes_manifest(self):
+        from unittest.mock import patch
+        m = module()
+        digest = "a" * 64
+        reference = "https://github.com/Carpe-Diem-Media/devcore-project/pull/6#issuecomment-123"
+        data = {"user": {"login": "JCSchoeman96"}, "html_url": reference,
+                "issue_url": "https://api.github.com/repos/Carpe-Diem-Media/devcore-project/issues/6",
+                "body": m.GitHubApproval.text(digest)}
+        def api(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
+        with patch.object(m.subprocess, "run", api):
+            self.assertEqual(m.GitHubApproval.verify(digest, reference)["author"], "JCSchoeman96")
+            for key, value in (("user", {"login": "JC-Agents"}), ("body", m.GitHubApproval.text("b" * 64)),
+                               ("html_url", reference + "x"), ("issue_url", "https://api.github.com/repos/other/repo/issues/6")):
+                old = data[key]
+                data[key] = value
+                with self.assertRaises(m.SlotError):
+                    m.GitHubApproval.verify(digest, reference)
+                data[key] = old
+
+    def test_redaction_spans_chunks(self):
+        m = module()
+        redactor = m.Redactor(["synthetic-secret"])
+        output = redactor.feed(b"prefix synthetic-") + redactor.feed(b"secret suffix") + redactor.feed(b"", final=True)
+        self.assertEqual(output, b"prefix [REDACTED] suffix")

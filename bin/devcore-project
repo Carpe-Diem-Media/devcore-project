@@ -3,7 +3,7 @@ set -euo pipefail
 set +x
 umask 077
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 PROGRAM="devcore-project"
 
 CENTRAL_DIR="${DEVCORE_CONFIG_DIR:-$HOME/.config/dev-core}"
@@ -23,7 +23,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-devcore-project v1.1.0
+devcore-project v1.2.0
 
 Reusable local-project bootstrap for the shared dev-core workstation stack.
 
@@ -43,6 +43,9 @@ Commands:
         --use-redis yes|no             Default: yes
         --local-env-file PATH          Default: .env.local
         --force                        Replace existing .devcore skeleton
+
+  slots manifest|enable|disable|status|acquire|run|release|retain|recover|verify
+      Opt-in managed NewYou slots. See slots --help and docs/managed-slots.md.
 
   plan
       Show the non-secret resolved project contract and readiness checks.
@@ -315,6 +318,7 @@ load_project() {
   REDIS_PREFIX="$(kv_get "$PROJECT_CONF" REDIS_PREFIX "$PROJECT_KEY")"
   RENDER_MAP="$(kv_get "$PROJECT_CONF" RENDER_MAP .devcore/render-map.tsv)"
   SUPPLEMENTAL_SECRETS="$(kv_get "$PROJECT_CONF" SUPPLEMENTAL_SECRETS)"
+  SLOT_POOL="$(kv_get "$PROJECT_CONF" SLOT_POOL)"
 }
 
 supplemental_map_configured() {
@@ -1294,11 +1298,1071 @@ EOF_README
   warn "customize .devcore/env.local.template and ensure '$local_env_file' is gitignored before activate"
 }
 
+
+slots_main() {
+  python3 /dev/fd/3 "$0" "$PROJECT_CONF" "$GLOBAL_CONF" "$CENTRAL_SECRETS" "$CENTRAL_DIR" "$@" 3<<'DEVCORE_SLOTS_PYTHON'
+# DEVCORE_SLOTS_PYTHON_BEGIN
+"""Opt-in Linux workstation leases. Embedded to preserve single-file releases."""
+import argparse
+import contextlib
+import copy
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import signal
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+
+class SlotError(RuntimeError):
+    """A non-secret operational diagnosis safe for normal CLI output."""
+
+
+def newyou_contract():
+    return {
+        "version": 1, "project": "new_you", "slots": 20, "http_base": 4220,
+        "test_host": "127.0.0.1", "test_port": 55433,
+        "database_prefix": "dc_new_you_s", "dev_database": "new_you_dev",
+        "legacy_test_database": "new_you_test",
+        "test_container": "dev-core-postgres-test-1", "admin_role": "devcore_admin",
+    }
+
+
+def validate_contract(contract):
+    expected = newyou_contract()
+    if contract != expected:
+        raise SlotError("unsupported slot contract; version 1 requires the exact NewYou manifest")
+
+
+def private_path(path, directory=False, create=False):
+    path = Path(path)
+    if create:
+        try:
+            if directory:
+                path.mkdir(mode=0o700)
+            else:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                os.close(fd)
+        except FileExistsError:
+            pass
+    entry = path.lstat()
+    wanted = stat.S_ISDIR if directory else stat.S_ISREG
+    mode = 0o700 if directory else 0o600
+    if (not wanted(entry.st_mode) or entry.st_uid != os.getuid()
+            or stat.S_IMODE(entry.st_mode) != mode or (not directory and entry.st_nlink != 1)):
+        raise SlotError("slot metadata must be private, owned, and free of links")
+    return path
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        private_path(path)
+    fd, temporary = tempfile.mkstemp(prefix=".slot-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def process_identity(pid=None):
+    pid = pid or os.getpid()
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return {"pid": pid, "start": fields[19], "boot": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+    except (OSError, IndexError):
+        raise SlotError("Linux process identity is unavailable") from None
+
+
+def process_alive(identity):
+    try:
+        return identity == process_identity(identity["pid"])
+    except (SlotError, KeyError):
+        return False
+
+
+def reserve_port(port):
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        held.bind(("127.0.0.1", port))
+        held.listen(1)
+        return held
+    except OSError:
+        held.close()
+        raise SlotError("HTTP port is occupied; its owner must stop or adopt it") from None
+
+
+def port_available(port):
+    try:
+        held = reserve_port(port)
+        held.close()
+        return True
+    except SlotError:
+        return False
+
+
+def target_identity(row):
+    return f"dc_new_you_s{row['slot']:02d}_g{row['generation']}"
+
+
+class GitHubApproval:
+    """Verify one owner-authored approval, then retain its non-secret receipt locally."""
+    @staticmethod
+    def text(digest):
+        return ("DEVCORE_SLOT_APPROVAL_V1\nmanifest-sha256: " + digest +
+                "\nI authorize creation and automatic cleanup of only the registered NewYou "
+                "disposable TEST generations described by this exact manifest. Existing databases "
+                "and unknown sessions must remain untouched.")
+
+    @classmethod
+    def verify(cls, digest, reference):
+        match = re.fullmatch(r"https://github\.com/Carpe-Diem-Media/devcore-project/(?:pull|issues)/(\d+)#issuecomment-(\d+)", reference)
+        if not match:
+            raise SlotError("owner authorization requires the exact GitHub approval comment URL")
+        issue, comment = match.groups()
+        result = subprocess.run(["gh", "api", f"repos/Carpe-Diem-Media/devcore-project/issues/comments/{comment}"],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise SlotError("cannot verify owner authorization with GitHub")
+        data = json.loads(result.stdout)
+        if (data.get("user", {}).get("login") != "JCSchoeman96"
+                or data.get("html_url") != reference
+                or data.get("issue_url") != f"https://api.github.com/repos/Carpe-Diem-Media/devcore-project/issues/{issue}"
+                or data.get("body", "").strip() != cls.text(digest)):
+            raise SlotError("owner approval author, target or exact manifest text does not match")
+        return {"author": "JCSchoeman96", "comment": comment, "url": reference, "verified_at": int(time.time())}
+
+
+class Pool:
+    """Registry transitions; resource side effects occur only through the adapter."""
+    def __init__(self, root, contract, resources, port_available=port_available, approval_check=GitHubApproval.verify):
+        validate_contract(contract)
+        self.root = private_path(root, directory=True, create=True)
+        self.contract = copy.deepcopy(contract)
+        self.resources = resources
+        self.port_available = port_available
+        self.process_alive = process_alive
+        self.approval_check = approval_check
+        private_path(self.root / "registry.lock", create=True)
+
+    def manifest(self):
+        return {"contract": self.contract, "registry": str(self.root.resolve()),
+                "targets": [{"slot": slot, "port": 4220 + slot,
+                             "database": f"dc_new_you_s{slot:02d}_g<32 lowercase UUID hex>",
+                             "role": f"dc_new_you_s{slot:02d}_g<same generation>_r"}
+                            for slot in range(1, 21)],
+                "cleanup": "registered generation, catalog OIDs and ownership comments, no jobs, zero clients; no FORCE",
+                "protected": ["new_you_dev", "new_you_test", "postgres", "template0", "template1", "unregistered targets"]}
+
+    def manifest_digest(self):
+        return hashlib.sha256(json.dumps(self.manifest(), sort_keys=True).encode()).hexdigest()
+
+    @contextlib.contextmanager
+    def registry(self):
+        path = self.root / "registry.lock"
+        private_path(path)
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            opened, current = os.fstat(fd), path.lstat()
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise SlotError("registry lock changed during acquisition")
+            data_path = self.root / "registry.json"
+            if data_path.exists() or data_path.is_symlink():
+                private_path(data_path)
+                state = json.loads(data_path.read_text())
+                if state.get("version") != 1 or state.get("manifest") != self.manifest_digest():
+                    raise SlotError("registry manifest changed; preserve existing allocations")
+            else:
+                state = {"version": 1, "manifest": self.manifest_digest(), "slots": {}}
+            yield state
+            atomic_json(data_path, state)
+        finally:
+            os.close(fd)
+
+    def enable(self, digest, approval_ref):
+        if digest != self.manifest_digest():
+            raise SlotError("owner authorization must name the exact manifest digest")
+        receipt = self.approval_check(digest, approval_ref)
+        with self.registry() as state:
+            state["authorization"] = {"manifest": digest, "receipt": receipt}
+            state["acquisition_enabled"] = True
+
+    def disable(self):
+        with self.registry() as state:
+            state["acquisition_enabled"] = False
+
+    def authorized(self, state):
+        if state.get("authorization", {}).get("manifest") != self.manifest_digest():
+            raise SlotError("slot activation and disposable cleanup authorization are required")
+
+    def validate_target(self, row):
+        if (type(row.get("slot")) is not int or row["slot"] not in range(1, 21)
+                or not re.fullmatch(r"[0-9a-f]{32}", row.get("generation", ""))
+                or not re.fullmatch(r"[0-9a-f]{32}", row.get("lease_id", ""))):
+            raise SlotError("invalid registered slot identity")
+        expected = target_identity(row)
+        if (row.get("database") != expected or row.get("role") != expected + "_r"
+                or row.get("port") != 4220 + row["slot"]
+                or row.get("test_host") != "127.0.0.1" or row.get("test_port") != 55433
+                or row.get("project") != "new_you" or row.get("manifest") != self.manifest_digest()):
+            raise SlotError("protected or unregistered target; refusing resource operation")
+
+    def owned(self, state, lease_id, generation, worktree):
+        for row in state["slots"].values():
+            if row["lease_id"] == lease_id:
+                if row["generation"] != generation or row["worktree"] != str(Path(worktree).resolve(strict=True)):
+                    raise SlotError("stale generation or different canonical worktree")
+                self.validate_target(row)
+                return row
+        raise SlotError("stale lease; no resource operation performed")
+
+    def acquire(self, worktree, wait=0, cancelled=lambda: False):
+        deadline = time.monotonic() + wait
+        worktree = str(Path(worktree).resolve(strict=True))
+        while True:
+            if cancelled():
+                raise SlotError("slot wait cancelled")
+            candidate = None
+            with self.registry() as state:
+                self.authorized(state)
+                if not state.get("acquisition_enabled", False):
+                    raise SlotError("new slot acquisition is disabled; active leases remain owned")
+                for slot in range(1, 21):
+                    old = state["slots"].get(str(slot))
+                    if old and old["state"] != "free":
+                        continue
+                    if not self.port_available(4220 + slot):
+                        continue
+                    candidate = {"slot": slot, "port": 4220 + slot, "project": "new_you",
+                                 "lease_id": uuid.uuid4().hex, "generation": uuid.uuid4().hex,
+                                 "worktree": worktree, "state": "preparing", "jobs": {},
+                                 "test_host": "127.0.0.1", "test_port": 55433,
+                                 "manifest": self.manifest_digest(), "preparer": process_identity()}
+                    candidate["database"] = target_identity(candidate)
+                    candidate["role"] = candidate["database"] + "_r"
+                    state["slots"][str(slot)] = candidate
+                    break
+            if candidate:
+                break
+            if time.monotonic() >= deadline:
+                raise SlotError("slots exhausted or ports blocked; shared TEST fallback is forbidden")
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            catalog = self.resources.prepare(copy.deepcopy(candidate))
+        except Exception:
+            with self.registry() as state:
+                row = self.owned(state, candidate["lease_id"], candidate["generation"], worktree)
+                row.update(state="quarantined", diagnosis="preparation incomplete; exact-target inspection required")
+            raise SlotError("slot quarantined after preparation failure; no resources adopted or deleted") from None
+        with self.registry() as state:
+            row = self.owned(state, candidate["lease_id"], candidate["generation"], worktree)
+            if row["state"] != "preparing":
+                raise SlotError("preparation ownership changed; slot requires inspection")
+            row.update(catalog=catalog, state="ready")
+            return copy.deepcopy(row)
+
+    def status(self):
+        with self.registry() as state:
+            return copy.deepcopy(list(state["slots"].values()))
+
+    def retain(self, lease_id, generation, worktree):
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            if row["jobs"] or row["state"] not in ("ready", "retained"):
+                raise SlotError("retain requires an idle ready or retained lease")
+            row["state"] = "retained"
+
+    def begin_job(self, lease_id, generation, worktree):
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            if row["state"] not in ("ready", "retained") or row["jobs"]:
+                raise SlotError("lease is not available for a managed job")
+            job = uuid.uuid4().hex
+            row["jobs"][job] = {"supervisor": process_identity(), "session": None}
+            row["state"] = "in_use"
+            return job
+
+    def set_session(self, lease_id, generation, worktree, job, pid):
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            row["jobs"][job]["session"] = process_identity(pid)
+
+    def end_job(self, lease_id, generation, worktree, job, result):
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            if job not in row["jobs"] or row["jobs"][job]["supervisor"] != process_identity():
+                raise SlotError("stale managed job completion")
+            del row["jobs"][job]
+            if row["state"] != "quarantined":
+                row["state"] = "ready" if result == 0 else "retained"
+            row["last_exit"] = result
+
+    def quarantine(self, lease_id, generation, worktree, diagnosis):
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            row.update(state="quarantined", diagnosis=diagnosis)
+
+    def release(self, lease_id, generation, worktree, retry=False):
+        with self.registry() as state:
+            self.authorized(state)
+            row = self.owned(state, lease_id, generation, worktree)
+            if row["jobs"]:
+                raise SlotError("managed job still owns resources; release refused")
+            if row["state"] == "free":
+                return
+            retryable = retry and row["state"] == "quarantined" and row.get("cleanup_retry", False)
+            if row["state"] not in ("ready", "retained") and not retryable:
+                raise SlotError("quarantined or incomplete slot requires exact-target diagnosis")
+            row["state"] = "cleaning"
+            row["cleaner"] = process_identity()
+            target = copy.deepcopy(row)
+        failed = False
+        try:
+            self.resources.cleanup(target)
+        except Exception:
+            failed = True
+        with self.registry() as state:
+            row = self.owned(state, lease_id, generation, worktree)
+            if failed:
+                row.update(state="quarantined", cleanup_retry=True, diagnosis="cleanup uncertain or clients remain; no forced termination")
+            else:
+                row.update(state="free", diagnosis="exact registered generation removed")
+        if failed:
+            raise SlotError("cleanup failed; slot quarantined and unavailable")
+
+    def recover(self):
+        with self.registry() as state:
+            for row in state["slots"].values():
+                dead_job = any(not self.process_alive(job["supervisor"]) for job in row["jobs"].values())
+                interrupted = ((row["state"] == "preparing" and not self.process_alive(row["preparer"]))
+                               or (row["state"] == "cleaning" and not self.process_alive(row["cleaner"])))
+                if dead_job or interrupted:
+                    row.update(state="quarantined", diagnosis="interrupted ownership; preserve descendants and inspect exact targets")
+        return self.status()
+
+
+# CLI and PostgreSQL adapter are defined below.
+
+def ownership_comment(row):
+    worktree = hashlib.sha256(row["worktree"].encode()).hexdigest()
+    return f"devcore-slot:v1:new_you:{row['lease_id']}:{row['generation']}:{worktree}:{row['manifest']}"
+
+
+def sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+class Postgres:
+    """Administrative adapter. SQL and passwords go only to standard input."""
+    def __init__(self, contract, password, executor=None, endpoint=None):
+        validate_contract(contract)
+        self.contract = contract
+        self.password = password
+        self.executor = executor or self.execute
+        self.endpoint = endpoint or self.check_endpoint
+        self.bound_container = None
+
+    def validate(self, row):
+        if (row.get("project") != "new_you" or type(row.get("slot")) is not int
+                or row["slot"] not in range(1, 21)
+                or not re.fullmatch(r"[0-9a-f]{32}", row.get("generation", ""))
+                or not re.fullmatch(r"[0-9a-f]{32}", row.get("lease_id", ""))
+                or row.get("database") != target_identity(row)
+                or row.get("role") != target_identity(row) + "_r"):
+            raise SlotError("protected or unregistered database identity")
+
+    def check_endpoint(self):
+        result = subprocess.run(["docker", "inspect", "-f", "{{.Id}}", self.contract["test_container"]],
+                                capture_output=True, text=True, timeout=15)
+        container_id = result.stdout.strip()
+        if result.returncode or not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            raise SlotError("cannot establish TEST container identity")
+        for arguments, expected in ((["port", container_id, "5432/tcp"], "127.0.0.1:55433"),
+                                    (["inspect", "-f", "{{.State.Running}}", container_id], "true")):
+            result = subprocess.run(["docker", *arguments], capture_output=True, text=True, timeout=15)
+            if result.returncode or result.stdout.strip() != expected:
+                raise SlotError("TEST container does not match the approved running loopback endpoint")
+        return container_id
+
+    def execute(self, statement):
+        if not self.bound_container or not re.fullmatch(r"[a-f0-9]{64}", self.bound_container):
+            raise SlotError("administrative SQL requires an inspected container identity")
+        result = subprocess.run(
+            ["docker", "exec", "-i", self.bound_container, "psql", "-X", "-qAt",
+             "-v", "ON_ERROR_STOP=1", "-U", self.contract["admin_role"], "-d", "postgres"],
+            input=statement, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            # PostgreSQL errors may quote SQL containing credentials. Never forward them.
+            raise SlotError("administrative TEST SQL failed; slot preserved for diagnosis")
+        return result.stdout.strip()
+
+    def catalog(self, row):
+        database, role = sql_literal(row["database"]), sql_literal(row["role"])
+        result = self.executor(f"""
+SELECT json_build_object(
+ 'database_oid', d.oid, 'role_oid', r.oid, 'owner_oid', d.datdba,
+ 'database_comment', shobj_description(d.oid, 'pg_database'),
+ 'role_comment', shobj_description(r.oid, 'pg_authid'),
+ 'clients', (SELECT count(*) FROM pg_stat_activity WHERE datid = d.oid),
+ 'privileged', r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls,
+ 'memberships', (SELECT count(*) FROM pg_auth_members WHERE roleid=r.oid OR member=r.oid),
+ 'other_databases', (SELECT count(*) FROM pg_database WHERE datdba=r.oid AND oid<>d.oid))
+FROM pg_database d JOIN pg_roles r ON r.rolname={role}
+WHERE d.datname={database};
+""")
+        try:
+            return json.loads(result)
+        except (ValueError, TypeError):
+            raise SlotError("exact database/role catalog ownership is unavailable") from None
+
+    def verify_catalog(self, row, catalog, cleanup=False):
+        comment = ownership_comment(row)
+        if (catalog.get("owner_oid") != catalog.get("role_oid")
+                or catalog.get("database_comment") != comment or catalog.get("role_comment") != comment
+                or catalog.get("privileged") is not False or catalog.get("memberships") != 0
+                or catalog.get("other_databases") != 0):
+            raise SlotError("catalog ownership or least-privilege identity differs; refusing adoption or cleanup")
+        if cleanup and (catalog.get("clients") != 0
+                        or any(catalog.get(key) != row["catalog"].get(key) for key in ("database_oid", "role_oid"))):
+            raise SlotError("remaining clients or stale catalog generation; cleanup refused")
+        for key in ("database_oid", "role_oid"):
+            if type(catalog.get(key)) is not int or catalog[key] <= 0:
+                raise SlotError("invalid catalog identity")
+
+    def prepare(self, row):
+        self.validate(row)
+        container_id = self.endpoint()
+        self.bound_container = container_id
+        database, role = row["database"], row["role"]
+        exists = self.executor(f"SELECT EXISTS(SELECT FROM pg_database WHERE datname={sql_literal(database)}) "
+                               f"OR EXISTS(SELECT FROM pg_roles WHERE rolname={sql_literal(role)});")
+        if exists != "f":
+            raise SlotError("database or role already exists; implicit adoption is forbidden")
+        password = self.password(row)
+        if not re.fullmatch(r"[A-Za-z0-9._:/+=,@%_-]+", password):
+            raise SlotError("managed password is not a supported literal")
+        comment = sql_literal(ownership_comment(row))
+        self.executor(f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION "
+                      f"NOBYPASSRLS PASSWORD {sql_literal(password)};\nCOMMENT ON ROLE {role} IS {comment};")
+        # CREATE without IF NOT EXISTS deliberately fails on a race rather than adopting it.
+        self.executor(f"CREATE DATABASE {database} OWNER {role} TEMPLATE template0 ALLOW_CONNECTIONS false;")
+        self.executor(f"COMMENT ON DATABASE {database} IS {comment};\n"
+                      f"REVOKE ALL ON DATABASE {database} FROM PUBLIC;\n"
+                      f"GRANT CONNECT, TEMPORARY ON DATABASE {database} TO {role};\n"
+                      f"ALTER DATABASE {database} ALLOW_CONNECTIONS true;")
+        catalog = self.catalog(row)
+        self.verify_catalog(row, catalog)
+        return {"database_oid": catalog["database_oid"], "role_oid": catalog["role_oid"], "container_id": container_id}
+
+    def cleanup(self, row):
+        self.validate(row)
+        container_id = self.endpoint()
+        if container_id != row["catalog"].get("container_id"):
+            raise SlotError("TEST container identity changed; cleanup refused")
+        self.bound_container = container_id
+        self.verify_catalog(row, self.catalog(row), cleanup=True)
+        database, role = row["database"], row["role"]
+        # Fence new connections, then recheck clients. Never terminate an existing client.
+        self.executor(f"ALTER ROLE {role} NOLOGIN;\nALTER DATABASE {database} ALLOW_CONNECTIONS false;")
+        self.verify_catalog(row, self.catalog(row), cleanup=True)
+        self.executor(f"DROP DATABASE {database};")
+        self.executor(f"DROP ROLE {role};")
+        result = self.executor(f"SELECT EXISTS(SELECT FROM pg_database WHERE datname={sql_literal(database)}) "
+                               f"OR EXISTS(SELECT FROM pg_roles WHERE rolname={sql_literal(role)});")
+        if result != "f":
+            raise SlotError("database cleanup could not be confirmed")
+
+def parse_pairs(path):
+    values = {}
+    for raw in Path(path).read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values.setdefault(key.strip(), value.strip())
+    return values
+
+
+def atomic_text(path, text):
+    fd, temporary = tempfile.mkstemp(prefix=".slot-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class SlotSecrets:
+    """Generated runtime secrets stay in DevCore's canonical secret store."""
+    def __init__(self, path):
+        self.path = private_path(path)
+
+    def key(self, row):
+        return "DEVCORE_SLOT_NEW_YOU_" + row["generation"].upper()
+
+    def existing(self, row):
+        private_path(self.path)
+        value = parse_pairs(self.path).get(self.key(row))
+        if not value or not re.fullmatch(r"[a-f0-9]{64}", value):
+            raise SlotError("managed generation secret is missing or invalid")
+        return value
+
+    def create(self, row):
+        # Same canonical per-state lock as Bash mutations, including path overrides.
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        config = home / ".config"
+        config.mkdir(mode=0o700, exist_ok=True)
+        for parent in (home, config):
+            entry = parent.lstat()
+            if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.getuid() or entry.st_mode & 0o022:
+                raise SlotError("unsafe central mutation lock parent")
+        central = private_path(config / "dev-core", directory=True, create=True)
+        locks = private_path(central / "locks", directory=True, create=True)
+        digest = hashlib.sha256(os.fsencode(str(self.path.parent.resolve() / self.path.name))).hexdigest()
+        lock = private_path(locks / f"state-{digest}.lock", create=True)
+        fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            private_path(self.path)
+            values = parse_pairs(self.path)
+            if self.key(row) in values:
+                raise SlotError("generation secret already exists; refusing reuse")
+            value = secrets.token_hex(32)
+            body = self.path.read_text()
+            atomic_text(self.path, body.rstrip("\n") + f"\n{self.key(row)}={value}\n")
+            return value
+        finally:
+            os.close(fd)
+
+
+def process_metadata():
+    """Read IDs only. Never inspect process arguments, environments or cookies."""
+    rows = {}
+    for path in Path("/proc").iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            rows[int(path.name)] = (int(fields[1]), int(fields[3]))  # parent, session
+        except (OSError, ValueError, IndexError):
+            continue
+    return rows
+
+
+def descendants(rows, parent):
+    owned = {parent}
+    while True:
+        new = {pid for pid, (ppid, _) in rows.items() if ppid in owned}
+        if new <= owned:
+            return owned
+        owned.update(new)
+
+
+def listener_ownership(port, supervisor):
+    inodes = set()
+    for file in ("/proc/net/tcp", "/proc/net/tcp6"):
+        for line in Path(file).read_text().splitlines()[1:]:
+            fields = line.split()
+            if int(fields[1].split(":")[1], 16) == port and fields[3] == "0A":
+                inodes.add(fields[9])
+    if not inodes:
+        return "absent"
+    pids = descendants(process_metadata(), supervisor)
+    found = set()
+    for pid in pids:
+        try:
+            files = list(Path(f"/proc/{pid}/fd").iterdir())
+        except OSError:
+            continue
+        for file in files:
+            try:
+                value = os.readlink(file)
+                if value.startswith("socket:["):
+                    found.add(value[8:-1])
+            except OSError:
+                continue
+    return "owned" if inodes <= found else "foreign"
+
+
+class Redactor:
+    """Stream redaction across read boundaries without retaining raw output."""
+    def __init__(self, values):
+        self.values = sorted({value.encode() for value in values if value}, key=len, reverse=True)
+        self.pending = b""
+
+    def feed(self, chunk, final=False):
+        self.pending += chunk
+        boundary = len(self.pending) if final else max(0, len(self.pending) - max(map(len, self.values), default=1))
+        output = bytearray()
+        position = 0
+        while position < boundary:
+            match = next((value for value in self.values if self.pending.startswith(value, position)), None)
+            if match:
+                output.extend(b"[REDACTED]")
+                position += len(match)
+            else:
+                output.append(self.pending[position])
+                position += 1
+        self.pending = self.pending[position:]
+        return bytes(output)
+
+
+@contextlib.contextmanager
+def concurrency_gate(root, name, count, owner=None, wait=3600):
+    directory = private_path(root / name, directory=True, create=True)
+    descriptors = []
+    held = None
+    receipt = None
+    permit = {"complete": False}
+    deadline = time.monotonic() + wait
+    try:
+        for index in range(count):
+            path = private_path(directory / str(index), create=True)
+            descriptors.append(os.open(path, os.O_RDWR | os.O_NOFOLLOW))
+        while held is None:
+            for index, fd in enumerate(descriptors):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                candidate = directory / f"{index}.json"
+                if owner and candidate.exists():
+                    private_path(candidate)
+                    if json.loads(candidate.read_text()).get("state") != "free":
+                        # An unlocked permit can still have live descendants after
+                        # supervisor loss. Its receipt, not a PID timeout, fences reuse.
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        continue
+                held = fd
+                receipt = candidate
+                if owner:
+                    atomic_json(receipt, {"state": "active", "supervisor": process_identity(),
+                                          "lease_id": owner["lease_id"], "generation": owner["generation"]})
+                break
+            if held is None:
+                if time.monotonic() >= deadline:
+                    raise SlotError("heavy capacity is occupied or quarantined; bounded wait expired")
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        yield permit
+    finally:
+        if owner and held is not None:
+            atomic_json(receipt, {"state": "free" if permit["complete"] else "quarantined",
+                                  "lease_id": owner["lease_id"], "generation": owner["generation"]})
+        for fd in descriptors:
+            os.close(fd)
+
+
+def heavy_limit():
+    memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    return max(1, min(2, (os.cpu_count() or 1) // 4, memory // (8 * 1024 ** 3)))
+
+
+def is_heavy_command(command):
+    if command[:2] in (["mix", "check"], ["mix", "check.deep"], ["mix", "dialyzer"], ["mix", "compile"]):
+        return True
+    if command[:2] != ["mix", "test"]:
+        return False
+    focused = "--only" in command or any(
+        value.startswith("test/") or ".exs" in value for value in command[2:])
+    return not focused
+
+
+def managed_run(pool, lease, command, env, *, http=False, auto_release=True, redact=(), heavy=False):
+    """Supervise through all descendants; abnormal supervisor loss stays quarantined."""
+    if not command:
+        raise SlotError("managed run requires a command")
+    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+        raise SlotError("Linux child subreaping is required")
+    # Capacity permits are independent of database ownership and focused tests.
+    gate = concurrency_gate(pool.root, "heavy", heavy_limit(), owner=lease) if heavy else contextlib.nullcontext()
+    with gate as permit:
+        try:
+            reservation = reserve_port(lease["port"])
+        except SlotError:
+            pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"], "port occupied before launch")
+            raise
+        try:
+            job = pool.begin_job(lease["lease_id"], lease["generation"], lease["worktree"])
+        except Exception:
+            reservation.close()
+            raise
+        runs = private_path(pool.root / "runs", directory=True, create=True)
+        directory = private_path(runs / job, directory=True, create=True)
+        output = private_path(directory / "output.log", create=True)
+        env = env.copy()
+        env.update(DEVCORE_SLOT_LEASE=lease["lease_id"], DEVCORE_SLOT_GENERATION=lease["generation"],
+                   DEVCORE_SLOT_JOB=job, DEVCORE_SLOT_PROJECT="new_you", NEW_YOU_PORT=str(lease["port"]),
+                   DEVCORE_SLOT_WORKTREE=lease["worktree"])
+        read_fd, write_fd = os.pipe()
+        launcher = "import os,sys,signal;[signal.signal(n,signal.SIG_DFL) for n in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)];fd=int(sys.argv[1]);go=os.read(fd,1);os.close(fd);" \
+                   "sys.exit(125) if go!=b'1' else None;os.execvpe(sys.argv[2],sys.argv[2:],os.environ)"
+        prior_handlers = {}
+        child = None
+        try:
+            for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+                prior_handlers[number] = signal.getsignal(number)
+                signal.signal(number, signal.SIG_IGN)
+            child = subprocess.Popen([sys.executable, "-c", launcher, str(read_fd), *command],
+                                     cwd=lease["worktree"], env=env, start_new_session=True,
+                                     pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            pool.set_session(lease["lease_id"], lease["generation"], lease["worktree"], job, child.pid)
+            identity = process_identity(child.pid)
+            def forward_interrupt(_signal, _frame):
+                if process_alive(identity):
+                    os.killpg(child.pid, signal.SIGINT)
+            signal.signal(signal.SIGINT, forward_interrupt)
+            # HTTP handoff is checked continuously. Unknown listeners are never signalled.
+            if http:
+                reservation.close()
+            os.write(write_fd, b"1")
+            os.close(write_fd)
+            write_fd = -1
+            os.close(read_fd)
+            read_fd = -1
+            import selectors
+            selector = selectors.DefaultSelector()
+            selector.register(child.stdout, selectors.EVENT_READ)
+            redactor = Redactor(redact)
+            result = None
+            output_open = True
+            has_children = True
+            with output.open("wb") as log:
+                while has_children or output_open:
+                    if http and listener_ownership(lease["port"], os.getpid()) == "foreign":
+                        pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
+                                        "foreign listener during HTTP handoff; preserve all processes")
+                        http = False
+                    for event, _ in selector.select(0.05):
+                        chunk = os.read(event.fileobj.fileno(), 65536)
+                        data = redactor.feed(chunk, final=not chunk)
+                        log.write(data)
+                        log.flush()
+                        try:
+                            os.write(sys.stdout.fileno(), data)
+                        except (OSError, AttributeError):
+                            pass
+                        if not chunk:
+                            selector.unregister(child.stdout)
+                            output_open = False
+                    while True:
+                        try:
+                            pid, status = os.waitpid(-1, os.WNOHANG)
+                        except ChildProcessError:
+                            has_children = False
+                            break
+                        if pid == 0:
+                            break
+                        if pid == child.pid:
+                            result = os.waitstatus_to_exitcode(status)
+                            child.returncode = result
+                log.flush()
+                os.fsync(log.fileno())
+            if permit is not None:
+                permit["complete"] = True
+            selector.close()
+            child.stdout.close()
+            result = 125 if result is None else result
+            atomic_json(directory / "result.json", {"lease_id": lease["lease_id"], "generation": lease["generation"],
+                        "job": job, "exit": result, "children_reaped": True})
+            pool.end_job(lease["lease_id"], lease["generation"], lease["worktree"], job, result)
+            if result == 0 and auto_release:
+                pool.release(lease["lease_id"], lease["generation"], lease["worktree"])
+            return result if result >= 0 else 128 - result
+        except BaseException:
+            pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
+                            "supervision interrupted; preserve all descendants and resources")
+            raise
+        finally:
+            reservation.close()
+            for fd in (read_fd, write_fd):
+                if fd >= 0:
+                    os.close(fd)
+            for number, handler in prior_handlers.items():
+                signal.signal(number, handler)
+
+class SlotContext:
+    """Validate opt-in consumer configuration and build immutable env snapshots."""
+    def __init__(self, tool, project_file, global_file, secret_file, central):
+        self.tool = str(Path(tool).resolve(strict=True))
+        self.worktree = str(Path.cwd().resolve())
+        self.project_file = str(Path(project_file).resolve(strict=True))
+        self.global_file = str(private_path(global_file).resolve())
+        self.secret_file = str(private_path(secret_file).resolve())
+        self.central = private_path(central, directory=True)
+        self.project = parse_pairs(self.project_file)
+        self.global_config = parse_pairs(self.global_file)
+        required = {"PROJECT_KEY": "new_you", "DEV_DB_ROLE": "new_you_dev", "DEV_DB_NAME": "new_you_dev",
+                    "TEST_DB_ROLE": "new_you_test", "TEST_DB_NAME": "new_you_test",
+                    "TEST_ROLE_CREATEDB": "no", "USE_REDIS": "no",
+                    "DEV_SECRET_KEY": "NEW_YOU_DEV_DB_PASSWORD", "TEST_SECRET_KEY": "NEW_YOU_TEST_DB_PASSWORD"}
+        if any(self.project.get(key) != value for key, value in required.items()):
+            raise SlotError("managed slots require the unchanged NewYou legacy allocation and NOCREATEDB")
+        for key, expected in (("PG_DEV_HOST", "127.0.0.1"), ("PG_DEV_PORT", "55432"),
+                              ("PG_TEST_HOST", "127.0.0.1"), ("PG_TEST_PORT", "55433"),
+                              ("PG_TEST_CONTAINER", "dev-core-postgres-test-1"), ("PG_ADMIN_ROLE", "devcore_admin")):
+            if self.global_config.get(key, expected) != expected:
+                raise SlotError("workstation endpoints differ from the approved slot contract")
+        self.contract = newyou_contract()
+        if self.project.get("SLOT_POOL"):
+            declared = Path(self.project["SLOT_POOL"])
+            if json.loads(declared.read_text()) != self.contract:
+                raise SlotError("SLOT_POOL declaration differs from the supported manifest")
+        slots = private_path(self.central / "slots", directory=True, create=True)
+        self.secrets = SlotSecrets(self.secret_file)
+        self.pool = Pool(slots / "new_you", self.contract, Postgres(self.contract, self.secrets.create))
+
+    def require_opt_in(self):
+        if not self.project.get("SLOT_POOL"):
+            raise SlotError("consumer has not opted in with SLOT_POOL; read the NewYou integration contract")
+
+    def environment(self, lease, profile):
+        if os.environ.get("MIX_TEST_PARTITION"):
+            raise SlotError("MIX_TEST_PARTITION is unsupported for managed TEST")
+        root = Path(self.worktree)
+        local_paths = {}
+        for variable, name in (("MIX_BUILD_PATH", "_build"), ("MIX_DEPS_PATH", "deps")):
+            chosen = Path(os.environ.get(variable, str(root / name)))
+            if not chosen.is_absolute():
+                chosen = root / chosen
+            if not chosen.resolve().is_relative_to(root):
+                raise SlotError("mutable build and dependency paths must stay inside this canonical worktree")
+            local_paths[variable] = str(chosen)
+        snapshots = private_path(self.pool.root / "snapshots", directory=True, create=True)
+        snapshot = private_path(snapshots / uuid.uuid4().hex, directory=True, create=True)
+        try:
+            return self.environment_snapshot(lease, profile, local_paths, snapshot)
+        finally:
+            shutil.rmtree(snapshot)
+
+    def environment_snapshot(self, lease, profile, local_paths, snapshot):
+        project = self.project.copy()
+        project.pop("SLOT_POOL", None)
+        project.update(TEST_DB_NAME=lease["database"], TEST_DB_ROLE=lease["role"],
+                       TEST_SECRET_KEY=self.secrets.key(lease))
+        # Resolve all tracked inputs before changing cwd for the existing renderer.
+        if project.get("SUPPLEMENTAL_SECRETS"):
+            project["SUPPLEMENTAL_SECRETS"] = str(Path(project["SUPPLEMENTAL_SECRETS"]).resolve(strict=True))
+        rows = []
+        rendered = []
+        for index, raw in enumerate(Path(project.get("RENDER_MAP", ".devcore/render-map.tsv")).read_text().splitlines()):
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            parts = raw.split("\t")
+            if len(parts) not in (3, 4) or parts[0] not in ("dev", "test", "all"):
+                raise SlotError("invalid managed render map")
+            template = str(Path(parts[1]).resolve(strict=True))
+            target = snapshot / f"env-{index}"
+            rows.append("\t".join([parts[0], template, str(target), parts[3] if len(parts) == 4 else ""]))
+            rendered.append((parts[0], target))
+        if not any(kind == "test" for kind, _ in rendered):
+            raise SlotError("managed run requires a TEST render profile")
+        project["RENDER_MAP"] = str(snapshot / "render-map.tsv")
+        atomic_text(snapshot / "project.conf", "".join(f"{key}={value}\n" for key, value in project.items()))
+        atomic_text(snapshot / "render-map.tsv", "\n".join(rows) + "\n")
+        renderer_env = os.environ.copy()
+        for key in list(renderer_env):
+            if key.startswith("DEVCORE_MUTATION_"):
+                renderer_env.pop(key)
+        renderer_env.update(DEVCORE_PROJECT_CONF=str(snapshot / "project.conf"),
+                            DEVCORE_GLOBAL_CONF=self.global_file, DEVCORE_SECRETS_FILE=self.secret_file,
+                            DEVCORE_CONFIG_DIR=str(self.central))
+        result = subprocess.run([self.tool, "render"], cwd=snapshot, env=renderer_env,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise SlotError("managed environment rendering failed; no worktree env files changed")
+        env = os.environ.copy()
+        for key in list(env):
+            if (key in ("DATABASE_URL", "MIX_TEST_PARTITION") or key.startswith(("PG", "DEVCORE_SLOT_", "DEVCORE_MUTATION_", "TEST_DATABASE_", "DEV_DATABASE_"))):
+                env.pop(key)
+        for kind, target in rendered:
+            if kind in ("all", "test", profile):
+                for key, value in parse_pairs(target).items():
+                    if key.startswith("export "):
+                        key = key[7:].strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                        value = value[1:-1]
+                    env[key] = value
+        env.update(MIX_ENV=profile, MIX_BUILD_PATH=local_paths["MIX_BUILD_PATH"], MIX_DEPS_PATH=local_paths["MIX_DEPS_PATH"],
+                   DEVCORE_PROJECT_CONF=self.project_file, DEVCORE_GLOBAL_CONF=self.global_file,
+                   DEVCORE_SECRETS_FILE=self.secret_file, DEVCORE_CONFIG_DIR=str(self.central))
+        # Every job receives the TEST identity, including DEV jobs launching test children.
+        expected = {"TEST_DATABASE_HOST": "127.0.0.1", "TEST_DATABASE_PORT": "55433",
+                    "TEST_DATABASE_NAME": lease["database"], "TEST_DATABASE_USERNAME": lease["role"],
+                    "TEST_DATABASE_PASSWORD": self.secrets.existing(lease)}
+        if any(env.get(key) != value for key, value in expected.items()):
+            raise SlotError("managed TEST template does not propagate the exact allocation")
+        return env
+
+    def redactions(self, lease):
+        values = parse_pairs(self.secret_file)
+        keys = {self.project.get("DEV_SECRET_KEY"), self.project.get("TEST_SECRET_KEY"), self.secrets.key(lease)}
+        supplemental = self.project.get("SUPPLEMENTAL_SECRETS")
+        if supplemental:
+            for raw in Path(supplemental).read_text().splitlines():
+                if raw.strip() and not raw.lstrip().startswith("#"):
+                    keys.add(raw.split("\t")[2].strip())
+        return [values[key] for key in keys if key in values]
+
+
+def verify_job(pool, lease_id, generation, job_id, worktree):
+    with pool.registry() as state:
+        row = pool.owned(state, lease_id, generation, worktree)
+        job = row["jobs"].get(job_id)
+        if row["state"] != "in_use" or not job or not process_alive(job["supervisor"]):
+            raise SlotError("managed allocation is not owned by a live job")
+        if os.getpid() not in descendants(process_metadata(), job["supervisor"]["pid"]):
+            raise SlotError("allocation verifier is outside the managed child tree")
+        return {key: row[key] for key in ("project", "slot", "port", "lease_id", "generation", "worktree", "database", "role", "test_host", "test_port")}
+
+
+def slot_cli(arguments):
+    parser = argparse.ArgumentParser(prog="devcore-project slots")
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("manifest", help="print the bounded activation/cleanup contract and digest")
+    enable = sub.add_parser("enable", help="record already-approved exact manifest authorization")
+    enable.add_argument("--manifest", required=True)
+    enable.add_argument("--approval-ref", required=True)
+    sub.add_parser("disable", help="stop new acquisition without touching active leases")
+    sub.add_parser("status", help="print non-secret allocated slots as JSON")
+    acquire = sub.add_parser("acquire", help="prepare a fresh generation for this worktree")
+    acquire.add_argument("--wait", type=float, default=0)
+    recovery = sub.add_parser("recover", help="quarantine interruptions or retry one previously guarded cleanup")
+    recovery.add_argument("--lease")
+    recovery.add_argument("--generation")
+    for action in ("release", "retain", "verify"):
+        option = sub.add_parser(action)
+        option.add_argument("--lease", required=True)
+        option.add_argument("--generation", required=True)
+        if action == "verify":
+            option.add_argument("--job", required=True)
+    run = sub.add_parser("run", help="automatically lease, supervise, then release or retain")
+    run.add_argument("profile", choices=("dev", "test"))
+    run.add_argument("--lease")
+    run.add_argument("--generation")
+    run.add_argument("--wait", type=float, default=0)
+    run.add_argument("--heavy", action="store_true")
+    run.add_argument("--retain", action="store_true")
+    run.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(arguments)
+    context = SlotContext(*sys.argv[1:6])
+    pool = context.pool
+    if args.action == "manifest":
+        print(json.dumps({"manifest": pool.manifest(), "sha256": pool.manifest_digest(),
+                          "port_conflicts": [port for port in range(4221, 4241) if not port_available(port)],
+                          "approval_text": GitHubApproval.text(pool.manifest_digest()),
+                          "heavy_limit": heavy_limit(), "logical_cpus": os.cpu_count(),
+                          "memory_bytes": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")}, sort_keys=True))
+    elif args.action == "enable":
+        context.require_opt_in()
+        pool.enable(args.manifest, args.approval_ref)
+        print(json.dumps({"authorized_manifest": pool.manifest_digest()}))
+    elif args.action == "disable":
+        pool.disable()
+        print(json.dumps({"acquisition_enabled": False}))
+    elif args.action in ("status", "recover"):
+        if args.action == "recover" and (args.lease or args.generation):
+            if not args.lease or not args.generation:
+                raise SlotError("cleanup recovery requires both exact lease and generation")
+            pool.release(args.lease, args.generation, context.worktree, retry=True)
+        print(json.dumps(pool.recover() if args.action == "recover" else pool.status(), sort_keys=True))
+    elif args.action == "acquire":
+        context.require_opt_in()
+        if not 0 <= args.wait <= 3600:
+            raise SlotError("wait must be bounded between 0 and 3600 seconds")
+        print(json.dumps(pool.acquire(context.worktree, wait=args.wait), sort_keys=True))
+    elif args.action in ("release", "retain"):
+        getattr(pool, args.action)(args.lease, args.generation, context.worktree)
+        print(json.dumps({"lease_id": args.lease, "operation": args.action}))
+    elif args.action == "verify":
+        print(json.dumps(verify_job(pool, args.lease, args.generation, args.job, context.worktree), sort_keys=True))
+    elif args.action == "run":
+        context.require_opt_in()
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        if not command or not 0 <= args.wait <= 3600 or bool(args.lease) != bool(args.generation):
+            raise SlotError("run needs a command, bounded wait, and both lease/generation if reusing a session")
+        # A nested compatible run keeps the same job and never acquires another database.
+        nested = os.environ.get("DEVCORE_SLOT_JOB")
+        if nested and not args.lease:
+            row = verify_job(pool, os.environ.get("DEVCORE_SLOT_LEASE"), os.environ.get("DEVCORE_SLOT_GENERATION"), nested, context.worktree)
+            env = os.environ.copy()
+            env["MIX_ENV"] = args.profile
+            if args.profile == "dev" and not env.get("DEV_DATABASE_PASSWORD"):
+                raise SlotError("a TEST job cannot become a shared DEV job")
+            os.execvpe(command[0], command, env)
+        if args.lease:
+            with pool.registry() as state:
+                lease = copy.deepcopy(pool.owned(state, args.lease, args.generation, context.worktree))
+        else:
+            lease = pool.acquire(context.worktree, wait=args.wait)
+        try:
+            env = context.environment(lease, args.profile)
+            code = managed_run(pool, lease, command, env, http=args.profile == "dev",
+                               auto_release=not args.lease and not args.retain,
+                               redact=context.redactions(lease), heavy=args.heavy or is_heavy_command(command))
+            if args.retain and code == 0:
+                pool.retain(lease["lease_id"], lease["generation"], context.worktree)
+            return code
+        except SlotError:
+            # Never turn failed preparation into a ready resource.
+            with pool.registry() as state:
+                row = pool.owned(state, lease["lease_id"], lease["generation"], context.worktree)
+                if row["state"] == "ready":
+                    row["state"] = "retained"
+            raise
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(slot_cli(sys.argv[6:]))
+    except KeyboardInterrupt:
+        raise SystemExit("ERROR: managed slot wait cancelled; resources preserved") from None
+    except SlotError as error:
+        raise SystemExit("ERROR: " + str(error)) from None
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        raise SystemExit("ERROR: managed slot operation failed; preserve resources and inspect non-secret status") from None
+# DEVCORE_SLOTS_PYTHON_END
+DEVCORE_SLOTS_PYTHON
+}
+
 main() {
   need_cmd python3
   local cmd="${1-help}"; shift || true
   case "$cmd" in
-    install|plan|activate|doctor|render|rotate|run)
+    install|plan|activate|doctor|render|rotate|run|slots)
       validate_state_paths
       ;;
   esac
@@ -1312,6 +2376,10 @@ main() {
       ;;
   esac
   case "$cmd" in
+    slots)
+      require_no_xtrace
+      slots_main "$@"
+      ;;
     help|-h|--help) usage ;;
     version|--version) printf '%s %s\n' "$PROGRAM" "$VERSION" ;;
     install)
@@ -1363,7 +2431,12 @@ main() {
           rotate_all
           ;;
         run)
-          run_profile "$@"
+          if [[ -n "$SLOT_POOL" ]]; then
+            require_no_xtrace
+            slots_main run "$@"
+          else
+            run_profile "$@"
+          fi
           ;;
       esac
       ;;

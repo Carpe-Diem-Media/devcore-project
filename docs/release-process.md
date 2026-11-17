@@ -2,7 +2,7 @@
 
 Status: current canonical process. The latest release, `v1.1.0`, was published on 2026-10-23. Tag [`v1.1.0`](https://github.com/JCSchoeman96/devcore-project/releases/tag/v1.1.0) points exactly to source commit `60f2ef09e52abca7b20f1572795579a549ba9d61`. Post-merge CI run `39967037057` passed on that commit. The `devcore-project` asset SHA-256 is `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. This backward-compatible v1 contract extension adds optional supplemental-secret delivery; existing owner-only v1 consumers remain compatible. Durable Ticketing adoption remains TICK-42.
 
-The canonical source is the default branch of `JCSchoeman96/devcore-project`. Consumer repositories pin neither source files nor a moving executable URL; workstation users install explicit release assets.
+The canonical source is the default branch of `Carpe-Diem-Media/devcore-project`. Consumer repositories pin neither source files nor a moving executable URL; workstation users install explicit release assets.
 
 Use SemVer tags named `vMAJOR.MINOR.PATCH`. Preserve the documented v1 consumer contract in patch releases. Add a minor version for backward-compatible contract capabilities. Use a major version for incompatible project declarations or command behavior. Record consumer migration steps before a breaking release.
 

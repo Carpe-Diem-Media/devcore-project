@@ -301,6 +301,71 @@ class PostgresIntegrationTests(unittest.TestCase):
                 check=False,
             )
 
+    def test_managed_slot_databases_are_isolated_restricted_and_fresh_on_reuse(self):
+        # Only CI-owned disposable containers reach this injected adapter. The CLI
+        # still requires the exact approved workstation endpoint and owner receipt.
+        from tests.test_slots import module, approve_for_test
+        m = module()
+        container = self.container_names[1]
+        inspected = self._run(["docker", "inspect", "-f", "{{.Id}}", container])
+        self.assertEqual(inspected.returncode, 0, "could not inspect CI-owned TEST container")
+        container_id = inspected.stdout.strip()
+        passwords = {}
+        def password(row):
+            value = secrets.token_hex(32)
+            passwords[row["role"]] = value
+            return value
+        adapter = m.Postgres(m.newyou_contract(), password, endpoint=lambda: container_id)
+        pool = m.Pool(self.root / "slot-pool", m.newyou_contract(), adapter,
+                      port_available=lambda _: True, approval_check=approve_for_test)
+        pool.enable(pool.manifest_digest(), "ci-owned-disposable-targets")
+        paths = [self.root / "worktree-a", self.root / "worktree-b"]
+        for path in paths:
+            path.mkdir()
+        import concurrent.futures
+        # Separate adapters avoid sharing the bound-connection attribute between jobs.
+        def claim(path):
+            own = m.Pool(pool.root, m.newyou_contract(),
+                         m.Postgres(m.newyou_contract(), password, endpoint=lambda: container_id),
+                         port_available=lambda _: True)
+            return own.acquire(str(path))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            a, b = list(executor.map(claim, paths))
+        self.assertNotEqual(a["database"], b["database"])
+        def runtime(row, sql, database=None):
+            result = self._run(
+                ["docker", "exec", "-i", container_id, "sh", "-c",
+                 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$1" -d "$2" -c "$3"',
+                 "slot-runtime", row["role"], database or row["database"], sql],
+                input_text=passwords[row["role"]] + "\n", check=False)
+            self.assertNotIn(passwords[row["role"]], result.stdout + result.stderr,
+                             "runtime client exposed a synthetic credential")
+            return result
+        def value(row, sql):
+            result = runtime(row, sql)
+            self.assertEqual(result.returncode, 0, "slot runtime SQL failed")
+            return result.stdout.strip()
+        for row, marker in ((a, "synthetic-a"), (b, "synthetic-b")):
+            self.assertEqual(value(row, "SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname=current_user"), "f")
+            self.assertEqual(value(row, f"CREATE TABLE isolation_probe(marker text); INSERT INTO isolation_probe VALUES ('{marker}'); SELECT marker FROM isolation_probe;"), marker)
+        self.assertEqual(value(a, "SELECT marker FROM isolation_probe"), "synthetic-a")
+        self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")
+        self.assertNotEqual(runtime(a, "SELECT 1", b["database"]).returncode, 0,
+                            "slot A could connect to slot B")
+        self.assertNotEqual(runtime(a, "CREATE DATABASE forbidden_extra_database").returncode, 0,
+                            "runtime role unexpectedly had CREATEDB")
+        # Independent connections keep committed markers. Cleanup removes only A.
+        pool.release(a["lease_id"], a["generation"], str(paths[0]))
+        self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")
+        fresh = pool.acquire(str(paths[0]))
+        self.assertEqual(fresh["slot"], a["slot"])
+        self.assertNotEqual(fresh["database"], a["database"])
+        self.assertEqual(value(fresh, "SELECT count(*) FROM pg_tables WHERE tablename='isolation_probe'"), "0")
+        self.assertNotEqual(runtime(a, "SELECT 1").returncode, 0,
+                            "old generation could still authenticate")
+        pool.release(fresh["lease_id"], fresh["generation"], str(paths[0]))
+        pool.release(b["lease_id"], b["generation"], str(paths[1]))
+
     def _assert_database_invariants(self, container, role, createdb):
         query = (
             "SELECT r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole, "

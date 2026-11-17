@@ -33,3 +33,9 @@ The tool does not treat workstation credentials as production credentials. Appli
 CI uses synthetic data and local mocks. It has no access to workstation secret files or databases. Do not add a real `.env`, secret-bearing fixture, private key, or credential-bearing command transcript.
 
 The user, JCSchoeman96, created and owns all DevCore materials. This repository is publicly visible on GitHub. It has no `LICENSE` file, and no additional open-source license grant has been declared. Historical Git provenance for the recovered artifacts was not recovered; see [provenance](provenance.md).
+
+## Opt-in managed TEST generations
+
+Unreleased 1.2.0 source adds a separate exact NewYou manifest and verified GitHub owner-approval receipt. Only newly registered generation targets qualify. The [managed-slot contract](managed-slots.md) defines endpoint/container-ID binding, private atomic metadata, OID/comment checks, connection fencing and zero-client cleanup. Runtime roles remain NOCREATEDB and lose PUBLIC cross-slot connectivity. Existing DEV/TEST identities and unrelated allocations are protected rather than adopted.
+
+Generation credentials stay in the existing canonical secret file under the shared state lock. Command rendering removes temporary secret snapshots after use. Logs redact known project/generation secret bytes across read boundaries; do not publish raw application output or participant data. Interrupted ownership or uncertain cleanup quarantines resources. No elapsed lease timeout authorizes reclaiming a resource or terminating a client.
