@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `f82c745d997d4916aa1a44706ca6ddb0bc8f7f55`. Its executable SHA-256 is `d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `715d3d0a8edc63b067c54d6738155924c0dea771`. Its executable SHA-256 is `f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -72,6 +72,14 @@ New CI-owned assertions inspect unchanged ACL after attempted GRANT to PUBLIC an
 
 `python3 -m unittest discover -s tests -v` at the corrected implementation ran 149 tests in 49.900 seconds, with 146 executed passes and three opt-in PostgreSQL skips. There are 69 slot tests. Bash syntax, ShellCheck and diff whitespace checks passed. The exact previous head bca4adc passed both jobs in run 44072541031, but that result predates this security correction. Fresh exact-head CI, full OCR and native independent review remain required for the corrected candidate. The live legacy PUBLIC CONNECT prerequisite and separate installation/cleanup authority are unchanged.
 
+## Partition setting after environment merge
+
+Full `ocr review --from origin/main --to HEAD` at `348e95789e51315076f7478b06fc27453feef8d7` exited 0 after 19m29s, session `c769731b-7d73-4b0b-a0bb-404f4e1f5274`. It selected four of 19 changed paths, with the same 15 configured exclusions. One planning timeout affected 1 of 36 requests, HTTP 200; no quota error or provider change occurred. One medium finding at bin/devcore-project:2257-2258 identified rendered MIX_TEST_PARTITION bypassing the inherited-environment check. Native independent review confirmed the source-contract gap. Current NewYou LocalConfig rejects nonempty partition values, so present application misrouting was not demonstrated.
+
+Two focused regression tests produced four failing cases before correction, covering both DEV/TEST templates and supplemental all-profile bindings. The final merged environment now rejects a nonempty MIX_TEST_PARTITION after all bindings, before any managed child launch. The tests pass and verify private snapshots are removed after rejection. Empty values retain the existing non-partition behavior. The database ownership manifest/digest is unchanged.
+
+At this corrected implementation, `python3 -m unittest discover -s tests -v` passed 151 total in 50.487 seconds, with 148 executed passes and three opt-in SQL skips. There are 71 slot tests. Bash syntax, ShellCheck and diff whitespace checks passed. Exact prior head 348e957 passed both hosted jobs in run 44077006348, including the administrative ownership proof, but that result does not certify this source change. Fresh exact-head CI, full OCR and native review remain required. No live installation, activation, ACL change or NewYou modification occurred.
+
 ## Reviewable installation and rollback commands
 
 These commands are a proposed installation procedure for this exact source artifact. They have not run against the live workstation. Execute them only after independent source review and explicit owner installation authorization. If the reviewed source changes, recompute its checksum and use the newly approved artifact. Do not silently install a moving branch.
@@ -81,7 +89,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```

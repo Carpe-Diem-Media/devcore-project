@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "f82c745d997d4916aa1a44706ca6ddb0bc8f7f55",
+  "source_commit": "715d3d0a8edc63b067c54d6738155924c0dea771",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5",
+  "executable_sha256": "f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
