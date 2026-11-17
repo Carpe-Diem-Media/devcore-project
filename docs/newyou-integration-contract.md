@@ -10,6 +10,8 @@ Preserve `.devcore/project.conf` legacy DEV/TEST allocations, role names, secret
 
 No slot may run against `new_you_test` or DEV as an isolation fallback. No application/test role receives CREATEDB. Do not use Ecto partitioning. Keep port 4220 outside the pool; managed port validation extends through 4240. Existing listeners block their numbers until their owners stop or consent to adoption. There is no process-killing adoption command.
 
+Preserve the existing `127.0.0.1` HTTP bind in `config/dev.exs`, `config/test.exs` and the DEV path of `config/runtime.exs`. Prove actual listener locality for the managed DEV server and applicable helper/browser servers before integration/activation. Port-0 helpers must remain loopback too. Reject wildcard/non-loopback configuration in the consumer's validation; do not infer locality from DevCore's port/process ownership check. Independent review found the current configuration safe, while that classifier itself does not enforce a bind address.
+
 The normal entry points remain:
 
 ```sh

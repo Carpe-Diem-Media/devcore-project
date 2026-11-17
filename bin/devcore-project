@@ -1602,12 +1602,14 @@ class Pool:
         with self.registry() as state:
             return copy.deepcopy(list(state["slots"].values()))
 
-    def retain(self, lease_id, generation, worktree):
+    def retain(self, lease_id, generation, worktree, diagnosis=None):
         with self.registry() as state:
             row = self.owned(state, lease_id, generation, worktree)
             if row["jobs"] or row["state"] not in ("ready", "retained"):
                 raise SlotError("retain requires an idle ready or retained lease")
             row["state"] = "retained"
+            if diagnosis is not None:
+                row["diagnosis"] = diagnosis
 
     def begin_job(self, lease_id, generation, worktree, profile="test"):
         if profile not in ("dev", "test"):
@@ -2082,7 +2084,8 @@ def managed_run(pool, lease, command, env, *, http=False, auto_release=True, red
         try:
             reservation = reserve_port(lease["port"])
         except SlotError:
-            pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"], "port occupied before launch")
+            pool.retain(lease["lease_id"], lease["generation"], lease["worktree"],
+                        "HTTP port occupied before launch; no child started; retry or release exact lease")
             raise
         job = None
         read_fd = write_fd = -1
@@ -2325,7 +2328,11 @@ class SlotContext:
             for key in list(env):
                 if key.startswith("DEV_DATABASE_"):
                     env.pop(key)
-        if "DATABASE_URL" in env or any(key.startswith("PG") for key in env):
+        binding_keys = {f"{kind}_DATABASE_{field}" for kind in ("DEV", "TEST")
+                        for field in ("HOST", "PORT", "NAME", "USERNAME", "PASSWORD")}
+        if any(key.startswith("PG") or "DATABASE_URL" in key or key == "DB_URL" or key.endswith("_DB_URL")
+               or (key.startswith(("DEV_DATABASE_", "TEST_DATABASE_")) and key not in binding_keys)
+               for key in env):
             raise SlotError("alternate database connection variables are unsupported in managed mode")
         env.update(MIX_ENV=profile, MIX_BUILD_PATH=local_paths["MIX_BUILD_PATH"], MIX_DEPS_PATH=local_paths["MIX_DEPS_PATH"],
                    DEVCORE_PROJECT_CONF=self.project_file, DEVCORE_GLOBAL_CONF=self.global_file,

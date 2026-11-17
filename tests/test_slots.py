@@ -465,12 +465,29 @@ class CommandTests(unittest.TestCase):
         self.assertTrue(output.exists())
         self.assertEqual(self.pool.status()[0]["state"], "ready")
 
-    def test_port_becoming_occupied_before_launch_quarantines(self):
+    def test_prelaunch_port_conflict_retains_releasable_database_without_touching_listener(self):
         with socket.socket() as held:
             held.bind(("127.0.0.1", self.lease["port"]))
             with self.assertRaises(self.m.SlotError):
                 self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy())
-        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+            row = self.pool.status()[0]
+            self.assertEqual(row["state"], "retained")
+            self.assertEqual(row["jobs"], {})
+            self.assertIn("before launch", row["diagnosis"])
+            self.pool.release(self.lease["lease_id"], self.lease["generation"], str(self.root))
+            self.assertEqual(self.pool.status()[0]["state"], "free")
+            self.assertEqual(held.getsockname(), ("127.0.0.1", self.lease["port"]))
+
+    def test_second_run_port_conflict_cannot_change_an_active_job(self):
+        job = self.pool.begin_job(self.lease["lease_id"], self.lease["generation"], str(self.root))
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", self.lease["port"]))
+            with self.assertRaises(self.m.SlotError):
+                self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy())
+            row = self.pool.status()[0]
+            self.assertEqual(row["state"], "in_use")
+            self.assertEqual(set(row["jobs"]), {job})
+            self.assertEqual(self.pool.resources.dropped, [])
 
     def test_missing_kernel_pidfd_support_fails_before_job_launch(self):
         from unittest.mock import patch
@@ -726,12 +743,23 @@ json.dump({'test_exit':test.returncode,'env':json.loads(test.stdout),'dev_exit':
         row = next(line.split("\t") for line in (self.fixture.project / ".devcore/render-map.tsv").read_text().splitlines() if line.startswith("test\t"))
         template = self.fixture.project / row[1]
         original = template.read_text()
-        for variable in ("DATABASE_URL", "PGDATABASE"):
+        for variable in ("DATABASE_URL", "PGDATABASE", "TEST_DATABASE_URL", "DATABASE_URL_TEST",
+                         "TEST_DB_URL", "DB_URL", "TEST_DATABASE_HOSTNAME"):
             with self.subTest(variable=variable):
                 template.write_text(original + f"\n{variable}=unrelated\n")
                 with self.assertRaisesRegex(self.m.SlotError, "alternate database"):
                     self.context.environment(self.lease, "test")
         template.write_text(original)
+
+    def test_inherited_database_url_aliases_cannot_survive_managed_merge(self):
+        for variable in ("DATABASE_URL_TEST", "TEST_DB_URL", "DB_URL"):
+            with self.subTest(variable=variable):
+                os.environ[variable] = "synthetic-legacy"
+                try:
+                    with self.assertRaisesRegex(self.m.SlotError, "alternate database"):
+                        self.context.environment(self.lease, "test")
+                finally:
+                    os.environ.pop(variable)
 
     def test_supplemental_profiles_purge_inheritance_and_apply_without_template_tokens(self):
         f = self.fixture
