@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "4f755dc236e76f9150779994663cbcc76f882160",
+  "source_commit": "0dbc5e73dde771371f46578d7649e91cd527329e",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "ba42c20dae2df6aba81e47c7159351c36d762fa5df08342563b9678d2d5011a2",
+  "executable_sha256": "2d116f1d20ab5c880fdb66f2842c60c5fb819047b0ee89f8cd28725cda1e146a",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -21,7 +21,8 @@
         "SlotSecrets",
         "GitHubApproval",
         "concurrency_gate",
-        "is_heavy_command"
+        "is_heavy_command",
+        "signal_owned_descendants"
       ]
     }
   ],
@@ -189,16 +190,20 @@
       "credential argv/output",
       "shared TEST fallback"
     ],
-    "initial_approval": "exact manifest text in verified JCSchoeman96 comment in owning GitHub repository"
+    "initial_approval": "exact manifest text in verified JCSchoeman96 comment in owning GitHub repository",
+    "nested_environment": "verified descendant/job, registered origin profile, rebuilt binding, partial/declaration fallback rejected",
+    "supplemental_profiles": "purge every declared name; inject active/all from canonical store; DEV imports only TEST database keys",
+    "alternate_connection_variables": "rendered DATABASE_URL and PG aliases fail closed after merging",
+    "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback"
   },
   "lifetime": {
     "normal": "command lease or explicit canonical-worktree session",
-    "children": "Linux subreaper; gated launch; wait through orphan descendants",
+    "children": "Linux subreaper and pidfds; HUP detach; INT/TERM signal verified descendants and wait through orphans",
     "supervisor_loss": "quarantine without reclaiming resources or heavy permits",
-    "port_race": "pre-launch bind and continuous DEV listener ownership inspection",
+    "port_race": "pre-launch bind; immediate DEV listener inspection then at most four checks per second",
     "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites",
     "failure": "retain private redacted logs/results and unavailable database",
-    "capacity": "automatic heavy Mix classification; at most 2 heavy permits with persistent quarantine; focused tests independent"
+    "capacity": "automatic heavy Mix classification; at most2 permits; proven pre-launch failure frees permit, uncertain launch quarantines"
   },
   "tests": [
     {
