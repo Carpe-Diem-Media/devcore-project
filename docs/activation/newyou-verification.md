@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `715d3d0a8edc63b067c54d6738155924c0dea771`. Its executable SHA-256 is `f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `a5caa029a4bf4049ec6d5f51d4df15d07d23dee3`. Its executable SHA-256 is `e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -80,6 +80,16 @@ Two focused regression tests produced four failing cases before correction, cove
 
 At this corrected implementation, `python3 -m unittest discover -s tests -v` passed 151 total in 50.487 seconds, with 148 executed passes and three opt-in SQL skips. There are 71 slot tests. Bash syntax, ShellCheck and diff whitespace checks passed. Exact prior head 348e957 passed both hosted jobs in run 44077006348, including the administrative ownership proof, but that result does not certify this source change. Fresh exact-head CI, full OCR and native review remain required. No live installation, activation, ACL change or NewYou modification occurred.
 
+## Final DEV binding validation and review limits
+
+Full `ocr review --from origin/main --to HEAD` at `06f6493af9a004874c2cce673f57e56f4d8fd5d8` exited 0 after 15m16s, session `bde97762-fae7-45c6-bb26-710113680a8e`. It selected four of 19 paths, with the same 15 configured exclusions. No tool/LLM retry error was reported; no quota failure or provider change occurred. Four medium findings concerned protected DEV access, listener locality, signal snapshots and final DEV environment bindings.
+
+Native independent technical review found no cross-cluster access path: DEV and TEST are separate containers/clusters and the generated LOGIN exists only on TEST. The CI-owned scenario now additionally verifies the role is absent on the separate DEV cluster and cannot authenticate there. The listener-address finding remains the documented WELL-147 consumer gate. Signal handling sends a verified snapshot without forced escalation; signal-resistant or later descendants keep their resources. Documentation now states this limit without promising bounded termination. These are preliminary technical dispositions, not owner Master Gate approval.
+
+The DEV binding finding was confirmed. Two focused regressions reproduced 11 failing cases for omitted or changed DEV host, port, name, user and password, plus supplemental override. The correction checks final DEV-profile bindings against the fixed endpoint, unchanged project identity and canonical secret. TEST still excludes DEV bindings. All cases pass and snapshot cleanup is asserted. No new ACL scan/change, forced kill or credential rotation was added.
+
+An initial full gate ran 153 tests in 61.908 seconds with 150 executed passes and three SQL skips. After adding the separate-DEV-cluster negative CI assertion, the stable `python3 -m unittest discover -s tests -v` gate ran 153 in 57.165 seconds, again 150 executed passes and three opt-in SQL skips. There are 73 slot tests. Bash syntax, ShellCheck and full diff whitespace passed. Prior head 06f6493 passed both hosted jobs in run 44080515661; fresh CI/full OCR/native review must cover the corrected candidate. The exact manifest remains unchanged and unapproved. No workstation installation, activation, database/privilege change, NewYou edit or agent interruption occurred.
+
 ## Reviewable installation and rollback commands
 
 These commands are a proposed installation procedure for this exact source artifact. They have not run against the live workstation. Execute them only after independent source review and explicit owner installation authorization. If the reviewed source changes, recompute its checksum and use the newly approved artifact. Do not silently install a moving branch.
@@ -89,7 +99,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```

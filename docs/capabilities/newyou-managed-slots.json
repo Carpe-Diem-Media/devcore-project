@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "715d3d0a8edc63b067c54d6738155924c0dea771",
+  "source_commit": "a5caa029a4bf4049ec6d5f51d4df15d07d23dee3",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "f5b42f515eaec43239ce144e22e18e7ee3fc359cdcbe31d5e8b4de5e58c15cb1",
+  "executable_sha256": "e76cb9206d6e00226ab9549bfa2a342c4da867f2a7d21956240035b1bf65d93a",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -221,7 +221,7 @@
     "nested_environment": "verified descendant/job, registered origin profile, rebuilt binding, partial/declaration fallback rejected",
     "supplemental_profiles": "purge every declared name; inject active/all from canonical store; DEV imports only TEST database keys",
     "alternate_connection_variables": "PG*, names containing DATABASE_URL, DB_URL and *_DB_URL rejected after merging; only five supported DEV/TEST_DATABASE binding keys",
-    "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback",
+    "signal_ownership": "pidfd syscalls probed before launch; identity and descendant membership rechecked; no PID/group fallback; one snapshot per signal, no automatic forced escalation; surviving descendants retain the lease",
     "legacy_test_boundary": "Effective PUBLIC CONNECT on exact new_you_test must be false before credentials/role creation; existing ACL never changed automatically"
   },
   "lifetime": {
