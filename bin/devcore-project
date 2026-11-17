@@ -2338,6 +2338,8 @@ class SlotContext:
             for key in list(env):
                 if key.startswith("DEV_DATABASE_"):
                     env.pop(key)
+        if env.get("MIX_TEST_PARTITION"):
+            raise SlotError("MIX_TEST_PARTITION is unsupported for managed TEST")
         binding_keys = {f"{kind}_DATABASE_{field}" for kind in ("DEV", "TEST")
                         for field in ("HOST", "PORT", "NAME", "USERNAME", "PASSWORD")}
         if any(key.startswith("PG") or "DATABASE_URL" in key or key == "DB_URL" or key.endswith("_DB_URL")

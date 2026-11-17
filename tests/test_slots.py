@@ -778,6 +778,33 @@ json.dump({'test_exit':test.returncode,'env':json.loads(test.stdout),'dev_exit':
                     self.context.environment(self.lease, "test")
         template.write_text(original)
 
+    def test_rendered_partition_is_rejected_before_managed_launch(self):
+        rows = [line.split("\t") for line in (self.fixture.project / ".devcore/render-map.tsv").read_text().splitlines()]
+        for profile in ("test", "dev"):
+            with self.subTest(profile=profile):
+                row = next(row for row in rows if row[0] == profile)
+                template = self.fixture.project / row[1]
+                original = template.read_text()
+                try:
+                    template.write_text(original + "\nMIX_TEST_PARTITION=2\n")
+                    with self.assertRaisesRegex(self.m.SlotError, "MIX_TEST_PARTITION"):
+                        self.context.environment(self.lease, profile)
+                finally:
+                    template.write_text(original)
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
+    def test_supplemental_partition_is_rejected_after_binding(self):
+        mapping = self.fixture.project / ".devcore/supplemental.tsv"
+        mapping.write_text("all\tMIX_TEST_PARTITION\tSYNTHETIC_PARTITION\n")
+        with self.fixture.secrets.open("a") as stream:
+            stream.write("SYNTHETIC_PARTITION=2\n")
+        self.context.project["SUPPLEMENTAL_SECRETS"] = str(mapping)
+        for profile in ("test", "dev"):
+            with self.subTest(profile=profile):
+                with self.assertRaisesRegex(self.m.SlotError, "MIX_TEST_PARTITION"):
+                    self.context.environment(self.lease, profile)
+        self.assertEqual(list((self.context.pool.root / "snapshots").iterdir()), [])
+
     def test_inherited_database_url_aliases_cannot_survive_managed_merge(self):
         for variable in ("DATABASE_URL_TEST", "TEST_DB_URL", "DB_URL"):
             with self.subTest(variable=variable):
