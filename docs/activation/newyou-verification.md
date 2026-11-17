@@ -2,7 +2,7 @@
 
 This record describes the DevCore source prerequisite, not live activation or completed NewYou integration. WELL-145 is the source issue; WELL-147 is the separate NewYou integration/proof dependency. Plane and the exact PR retain current execution/CI/review state.
 
-Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `189f2ad74613212b34b5fe9d0cd831f07cc57ca3`. Its executable SHA-256 is `27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
+Source base is `6446dc428ae3ef2edb8d11b9f94aea0128854d1d`. Implementation checkpoint is `f82c745d997d4916aa1a44706ca6ddb0bc8f7f55`. Its executable SHA-256 is `d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5`. Documentation-only commits may follow without changing that executable. The canonical source is `Carpe-Diem-Media/devcore-project`; the historical personal URL redirects there. This branch uses source version 1.2.0 and has no release tag.
 
 The installed executable was inspected, not patched. It reports 1.1.0 with SHA-256 `df7dd3263197d33416b99699b5f09ee2b37bb4a45f55cc2a7bb4164dbbff9568`. No installation, live activation, database provisioning/drop, service change or agent migration occurred. Port 4237 remained occupied during read-only inspection. The initial legacy TEST/PLT holder PID 4026121 later released its lock without intervention by this work.
 
@@ -62,6 +62,16 @@ After merging, the environment rejects PG*, names containing DATABASE_URL, bare 
 
 At implementation checkpoint `189f2ad74613212b34b5fe9d0cd831f07cc57ca3`, `python3 -m unittest discover -s tests -v` passed 146 total in 49.447 seconds, with 143 executed passes and three opt-in PostgreSQL skips. The slot module has 66 tests. Bash syntax, ShellCheck, full diff whitespace and the source-linked hash checks passed. Exact previous head da764b6 passed both hosted jobs in run 44066522689, but that result is not copied to the corrected candidate. Fresh exact-head CI/OCR and native review are required. The legacy PUBLIC CONNECT activation prerequisite is unchanged and remains separately unauthorized.
 
+## Administrative database ownership correction
+
+Full `ocr review --from origin/main --to HEAD` at `bca4adc20fabee9eb5b05991c62c6ea4c1145828` exited 0 after 21m57s, session `bc53e04e-0b0c-4ee3-94b8-b0612ad4a877`. It selected four of 19 changed paths with 15 configured exclusions. One planning timeout affected 1 of 48 requests, HTTP 200; no quota error or provider change occurred. The medium listener-address finding has the existing conditional consumer disposition. Independent review confirmed a new HIGH blocker: a runtime database owner can grant CONNECT to PUBLIC or another role, reopening cross-slot access despite initial revocation. Earlier green CI did not test this operation and does not certify that candidate's isolation boundary.
+
+Two focused regressions failed before correction. The current source keeps database ownership with the existing `devcore_admin`. Runtime gets only CONNECT/TEMPORARY on its database and USAGE/CREATE on public, without grant options, database CREATE, ownership or role memberships. Catalog verification requires the administrator owner OID, rejects runtime ownership and any runtime-owned database, records the owner OID at preparation and compares it during cleanup. An additional test rejects a changed administrator identity before mutations. The exact declaration and manifest now bind `database_owner`; no old manifest approval can authorize this changed contract. No approval has been granted for either manifest.
+
+New CI-owned assertions inspect unchanged ACL after attempted GRANT to PUBLIC and the other slot role, recheck denied cross-slot access, deny SET ROLE and ALTER DATABASE ownership, and exercise transactional table/function/index/temporary-table DDL. Current NewYou migrations were inspected read-only and use public-schema application objects and Ash functions; no current CREATE EXTENSION/SCHEMA or ALTER DATABASE requirement was found. This is compatibility evidence for the scoped grants, not execution of branch migrations. See PostgreSQL's [GRANT documentation](https://www.postgresql.org/docs/18/sql-grant.html) and [privilege inquiry functions](https://www.postgresql.org/docs/18/functions-info.html#FUNCTIONS-INFO-ACCESS-TABLE).
+
+`python3 -m unittest discover -s tests -v` at the corrected implementation ran 149 tests in 49.900 seconds, with 146 executed passes and three opt-in PostgreSQL skips. There are 69 slot tests. Bash syntax, ShellCheck and diff whitespace checks passed. The exact previous head bca4adc passed both jobs in run 44072541031, but that result predates this security correction. Fresh exact-head CI, full OCR and native independent review remain required for the corrected candidate. The live legacy PUBLIC CONNECT prerequisite and separate installation/cleanup authority are unchanged.
+
 ## Reviewable installation and rollback commands
 
 These commands are a proposed installation procedure for this exact source artifact. They have not run against the live workstation. Execute them only after independent source review and explicit owner installation authorization. If the reviewed source changes, recompute its checksum and use the newly approved artifact. Do not silently install a moving branch.
@@ -71,7 +81,7 @@ From the exact reviewed DevCore checkout:
 ```sh
 git rev-parse HEAD
 sha256sum bin/devcore-project
-bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1
+bash install/install.sh --source bin/devcore-project --version 1.2.0 --sha256 d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5
 ~/.local/bin/devcore-project --version
 sha256sum ~/.local/bin/devcore-project
 ```
@@ -86,7 +96,7 @@ bash install/rollback.sh
 sha256sum ~/.local/bin/devcore-project
 ```
 
-The existing installer keeps a sequenced previous executable. Rollback changes only the executable. It does not delete retained databases, metadata, logs or secrets. Before changing a live executable, let consenting managed jobs finish or preserve their reviewed execution version and nested verifier access. Follow the staged NewYou integration procedure before activation. The requested cleanup manifest SHA-256 is `2aef1ff43076759edea2dc5f32b00cf80499c9c573f1085e8cf898c5788fe3e7`; it remains `NOT_AUTHORIZED`.
+The existing installer keeps a sequenced previous executable. Rollback changes only the executable. It does not delete retained databases, metadata, logs or secrets. Before changing a live executable, let consenting managed jobs finish or preserve their reviewed execution version and nested verifier access. Follow the staged NewYou integration procedure before activation. The requested cleanup manifest SHA-256 is `3fb71d0ed24dfc4ab8ef75226916da624f5ca4a18343695a154733eb2a93e556`; it remains `NOT_AUTHORIZED`.
 
 ## Acceptance assessment boundary
 

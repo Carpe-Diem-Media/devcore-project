@@ -4,9 +4,9 @@
   "owning_repository": "Carpe-Diem-Media/devcore-project",
   "execution_issue": "WELL-145",
   "consumer_follow_up": "WELL-147",
-  "source_commit": "189f2ad74613212b34b5fe9d0cd831f07cc57ca3",
+  "source_commit": "f82c745d997d4916aa1a44706ca6ddb0bc8f7f55",
   "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
-  "executable_sha256": "27f5189f7fc27c5b462d8d342b8a97e01882b144ceebafe6cd1df232fad784f1",
+  "executable_sha256": "d9cbeebf2d76ffcd887f9a66397beb21b37726f91dbd017033128a4408abc0b5",
   "entrypoints": [
     {
       "path": "bin/devcore-project",
@@ -40,7 +40,8 @@
     "generation": "32 lowercase UUID hexadecimal characters",
     "lease_identity": "separate 32-character UUID",
     "provisioning": "fresh template0 database; never implicit adoption",
-    "shared_dev": "127.0.0.1:55432/new_you_dev; unchanged"
+    "shared_dev": "127.0.0.1:55432/new_you_dev; unchanged",
+    "database_owner": "devcore_admin; runtime has no ownership or membership"
   },
   "states": [
     "free",
@@ -195,15 +196,15 @@
       "NOREPLICATION",
       "NOBYPASSRLS"
     ],
-    "cross_slot_boundary": "PUBLIC database privileges revoked before connections enabled",
+    "cross_slot_boundary": "Administrative database ownership; runtime CONNECT/TEMPORARY and public-schema USAGE/CREATE without grant options; PUBLIC database privileges revoked",
     "cleanup_guards": [
       "fixed project and TEST endpoint",
       "immutable inspected container ID",
       "registered exact database and role",
       "generation-bound ownership comments",
-      "recorded database/role OIDs",
-      "exact database owner",
-      "no memberships or unrelated owned databases",
+      "recorded database/runtime-role/administrator-owner OIDs",
+      "exact administrative database owner",
+      "no memberships or runtime-owned databases",
       "no managed jobs",
       "zero clients before and after connection fencing"
     ],
