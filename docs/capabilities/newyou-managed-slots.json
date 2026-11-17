@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "capability": "newyou-managed-development-and-test-slots",
+  "owning_repository": "Carpe-Diem-Media/devcore-project",
+  "execution_issue": "WELL-145",
+  "consumer_follow_up": "WELL-147",
+  "source_commit": "1e10975b518a1301a70839517e7938188f7acc7b",
+  "source_base": "6446dc428ae3ef2edb8d11b9f94aea0128854d1d",
+  "executable_sha256": "383370ed4b25e20af8dbb4c347783c0310380c924a8772bfa49b7ff4a1813831",
+  "entrypoints": [
+    {
+      "path": "bin/devcore-project",
+      "symbols": [
+        "slots_main",
+        "slot_cli",
+        "Pool",
+        "Postgres",
+        "SlotContext",
+        "managed_run",
+        "verify_job",
+        "SlotSecrets",
+        "GitHubApproval",
+        "concurrency_gate",
+        "is_heavy_command"
+      ]
+    }
+  ],
+  "allocation": {
+    "project": "new_you",
+    "slot_min": 1,
+    "slot_max": 20,
+    "http_port_min": 4221,
+    "http_port_max": 4240,
+    "excluded_primary_port": 4220,
+    "test_host": "127.0.0.1",
+    "test_port": 55433,
+    "database": "dc_new_you_sNN_gGENERATION",
+    "role": "dc_new_you_sNN_gGENERATION_r",
+    "generation": "32 lowercase UUID hexadecimal characters",
+    "lease_identity": "separate 32-character UUID",
+    "provisioning": "fresh template0 database; never implicit adoption",
+    "shared_dev": "127.0.0.1:55432/new_you_dev; unchanged"
+  },
+  "states": [
+    "free",
+    "preparing",
+    "ready",
+    "in_use",
+    "retained",
+    "cleaning",
+    "quarantined"
+  ],
+  "transitions": [
+    {
+      "from": [
+        "absent",
+        "free"
+      ],
+      "to": "preparing",
+      "owner": "Pool.acquire",
+      "guards": [
+        "matching approved manifest",
+        "new acquisition enabled",
+        "atomic registry lock",
+        "candidate port bind succeeds"
+      ]
+    },
+    {
+      "from": [
+        "preparing"
+      ],
+      "to": "ready",
+      "owner": "Pool.acquire",
+      "guards": [
+        "fresh restricted role/database",
+        "exact ownership comments and OIDs",
+        "same lease and generation"
+      ]
+    },
+    {
+      "from": [
+        "ready",
+        "retained"
+      ],
+      "to": "in_use",
+      "owner": "Pool.begin_job",
+      "guards": [
+        "canonical worktree",
+        "exact lease and generation",
+        "no existing job"
+      ]
+    },
+    {
+      "from": [
+        "in_use"
+      ],
+      "to": [
+        "ready",
+        "retained"
+      ],
+      "owner": "Pool.end_job",
+      "guards": [
+        "same registered supervisor",
+        "all managed descendants reaped",
+        "result persisted before release"
+      ],
+      "selection": "ready for exit 0, retained for failure"
+    },
+    {
+      "from": [
+        "ready",
+        "retained"
+      ],
+      "to": "cleaning",
+      "owner": "Pool.release",
+      "guards": [
+        "approved manifest",
+        "exact lease/generation/worktree",
+        "no jobs"
+      ]
+    },
+    {
+      "from": [
+        "cleaning"
+      ],
+      "to": [
+        "free",
+        "quarantined"
+      ],
+      "owner": "Pool.release",
+      "selection": "free only for confirmed exact-target cleanup; quarantine on any uncertainty"
+    },
+    {
+      "from": [
+        "quarantined"
+      ],
+      "to": "cleaning",
+      "owner": "Pool.release(retry=True)",
+      "guards": [
+        "previous guarded cleanup failure only",
+        "no jobs",
+        "exact owner binding",
+        "all catalog/client checks repeated"
+      ]
+    },
+    {
+      "from": [
+        "preparing",
+        "cleaning",
+        "in_use"
+      ],
+      "to": "quarantined",
+      "owner": "Pool.recover",
+      "guards": [
+        "dead/interrupted registered supervisor or operation"
+      ],
+      "side_effects": "no deletion, no termination, no reassignment"
+    }
+  ],
+  "security": {
+    "secret_authority": "~/.config/dev-core/project-db.env",
+    "secret_write_lock": "existing canonical state-path flock",
+    "runtime_role_flags": [
+      "LOGIN",
+      "NOSUPERUSER",
+      "NOCREATEDB",
+      "NOCREATEROLE",
+      "NOREPLICATION",
+      "NOBYPASSRLS"
+    ],
+    "cross_slot_boundary": "PUBLIC database privileges revoked before connections enabled",
+    "cleanup_guards": [
+      "fixed project and TEST endpoint",
+      "immutable inspected container ID",
+      "registered exact database and role",
+      "generation-bound ownership comments",
+      "recorded database/role OIDs",
+      "exact database owner",
+      "no memberships or unrelated owned databases",
+      "no managed jobs",
+      "zero clients before and after connection fencing"
+    ],
+    "forbidden": [
+      "FORCE drop",
+      "unknown session termination",
+      "legacy/shared database adoption",
+      "PID-only ownership",
+      "heartbeat-only expiry",
+      "credential argv/output",
+      "shared TEST fallback"
+    ],
+    "initial_approval": "exact manifest text in verified JCSchoeman96 comment in owning GitHub repository"
+  },
+  "lifetime": {
+    "normal": "command lease or explicit canonical-worktree session",
+    "children": "Linux subreaper; gated launch; wait through orphan descendants",
+    "supervisor_loss": "quarantine without reclaiming resources or heavy permits",
+    "port_race": "pre-launch bind and continuous DEV listener ownership inspection",
+    "environment": "existing renderer; unique private snapshots removed after loading; no worktree env rewrites",
+    "failure": "retain private redacted logs/results and unavailable database",
+    "capacity": "automatic heavy Mix classification; at most 2 heavy permits with persistent quarantine; focused tests independent"
+  },
+  "tests": [
+    {
+      "path": "tests/test_slots.py",
+      "symbols": [
+        "SlotTests",
+        "PostgresAdapterTests",
+        "CommandTests",
+        "EnvironmentTests",
+        "ActivationTests",
+        "MultiprocessTests",
+        "OwnerApprovalTests"
+      ],
+      "kind": "temporary metadata and injected resource/approval adapters; no workstation databases"
+    },
+    {
+      "path": "tests/test_postgres_integration.py",
+      "symbols": [
+        "PostgresIntegrationTests.test_managed_slot_databases_are_isolated_restricted_and_fresh_on_reuse"
+      ],
+      "kind": "opt-in CI-owned PostgreSQL containers; synthetic committed rows, denied cross-slot connections, NOCREATEDB and fresh reuse"
+    }
+  ],
+  "integration_contract": "docs/newyou-integration-contract.md",
+  "operations_contract": "docs/managed-slots.md",
+  "activation_request": "docs/activation/newyou-workstation-manifest.json",
+  "remaining_consumer_proof": [
+    "strict NewYou LocalConfig/Proof.Result verification",
+    "current branch migrations and business-interface fixtures",
+    "all child BEAM/browser/restart/prod paths",
+    "automatic cache-specific PLT synchronization and local copies for mutable core reads",
+    "two consenting worktrees and failed-run retain/reuse",
+    "measured full-suite concurrency",
+    "separate NewYou PR, exact-head review/CI and resulting-main verification"
+  ],
+  "limitations": [
+    "Linux only",
+    "quarantine after unknown supervisor/preparation loss requires separately reviewed exact-target reconciliation",
+    "generated secret entries and diagnostic logs retained without automatic purge",
+    "does not isolate shared DEV",
+    "does not implement NewYou PLT or application wiring",
+    "not installed or activated by the source change"
+  ]
+}
