@@ -1596,13 +1596,15 @@ class Pool:
                 raise SlotError("retain requires an idle ready or retained lease")
             row["state"] = "retained"
 
-    def begin_job(self, lease_id, generation, worktree):
+    def begin_job(self, lease_id, generation, worktree, profile="test"):
+        if profile not in ("dev", "test"):
+            raise SlotError("managed job profile must be dev or test")
         with self.registry() as state:
             row = self.owned(state, lease_id, generation, worktree)
             if row["state"] not in ("ready", "retained") or row["jobs"]:
                 raise SlotError("lease is not available for a managed job")
             job = uuid.uuid4().hex
-            row["jobs"][job] = {"supervisor": process_identity(), "session": None}
+            row["jobs"][job] = {"supervisor": process_identity(), "session": None, "profile": profile}
             row["state"] = "in_use"
             return job
 
@@ -2000,51 +2002,100 @@ def is_heavy_command(command):
     return not focused
 
 
+def signal_owned_descendants(supervisor, number):
+    """Signal identified descendants through pidfds, never a recycled PID/group."""
+    if not process_alive(supervisor):
+        raise SlotError("supervisor identity changed; no process signalled")
+    failed = False
+    for pid in descendants(process_metadata(), supervisor["pid"]) - {supervisor["pid"]}:
+        fd = None
+        try:
+            identity = process_identity(pid)
+            fd = os.pidfd_open(pid)
+            if (process_alive(identity)
+                    and pid in descendants(process_metadata(), supervisor["pid"])):
+                signal.pidfd_send_signal(fd, number)
+        except (ProcessLookupError, SlotError):
+            continue
+        except OSError:
+            failed = True
+        finally:
+            if fd is not None:
+                os.close(fd)
+    if failed:
+        raise SlotError("some owned descendants could not be signalled; preserve resources")
+
+
 def managed_run(pool, lease, command, env, *, http=False, auto_release=True, redact=(), heavy=False):
     """Supervise through all descendants; abnormal supervisor loss stays quarantined."""
     if not command:
         raise SlotError("managed run requires a command")
-    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
-        raise SlotError("Linux child subreaping is required")
-    # Capacity permits are independent of database ownership and focused tests.
+    if (not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal")
+            or ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0):
+        raise SlotError("Linux child subreaping and pidfd signalling are required")
+    descriptor = None
+    try:
+        descriptor = os.pidfd_open(os.getpid())
+        signal.pidfd_send_signal(descriptor, 0)
+    except OSError:
+        raise SlotError("Linux kernel pidfd signalling is unavailable; no managed child launched") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     gate = concurrency_gate(pool.root, "heavy", heavy_limit(), owner=lease) if heavy else contextlib.nullcontext()
     with gate as permit:
+        # No child exists yet. Only an attempted Popen with uncertain outcome can
+        # change this; proven pre-launch failures must not consume heavy capacity.
+        if permit is not None:
+            permit["complete"] = True
         try:
             reservation = reserve_port(lease["port"])
         except SlotError:
             pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"], "port occupied before launch")
             raise
-        try:
-            job = pool.begin_job(lease["lease_id"], lease["generation"], lease["worktree"])
-        except Exception:
-            reservation.close()
-            raise
-        runs = private_path(pool.root / "runs", directory=True, create=True)
-        directory = private_path(runs / job, directory=True, create=True)
-        output = private_path(directory / "output.log", create=True)
-        env = env.copy()
-        env.update(DEVCORE_SLOT_LEASE=lease["lease_id"], DEVCORE_SLOT_GENERATION=lease["generation"],
-                   DEVCORE_SLOT_JOB=job, DEVCORE_SLOT_PROJECT="new_you", NEW_YOU_PORT=str(lease["port"]),
-                   DEVCORE_SLOT_WORKTREE=lease["worktree"])
-        read_fd, write_fd = os.pipe()
-        launcher = "import os,sys,signal;[signal.signal(n,signal.SIG_DFL) for n in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)];fd=int(sys.argv[1]);go=os.read(fd,1);os.close(fd);" \
-                   "sys.exit(125) if go!=b'1' else None;os.execvpe(sys.argv[2],sys.argv[2:],os.environ)"
+        job = None
+        read_fd = write_fd = -1
         prior_handlers = {}
+        child_possible = False
         child = None
         try:
+            job = pool.begin_job(lease["lease_id"], lease["generation"], lease["worktree"],
+                                 profile="dev" if http else "test")
+            runs = private_path(pool.root / "runs", directory=True, create=True)
+            directory = private_path(runs / job, directory=True, create=True)
+            output = private_path(directory / "output.log", create=True)
+            env = env.copy()
+            env.update(DEVCORE_SLOT_LEASE=lease["lease_id"], DEVCORE_SLOT_GENERATION=lease["generation"],
+                       DEVCORE_SLOT_JOB=job, DEVCORE_SLOT_PROJECT="new_you", NEW_YOU_PORT=str(lease["port"]),
+                       DEVCORE_SLOT_WORKTREE=lease["worktree"])
+            read_fd, write_fd = os.pipe()
+            launcher = "import os,sys,signal;[signal.signal(n,signal.SIG_DFL) for n in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)];fd=int(sys.argv[1]);go=os.read(fd,1);os.close(fd);" \
+                       "sys.exit(125) if go!=b'1' else None;os.execvpe(sys.argv[2],sys.argv[2:],os.environ)"
+            pending = []
             for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
                 prior_handlers[number] = signal.getsignal(number)
-                signal.signal(number, signal.SIG_IGN)
-            child = subprocess.Popen([sys.executable, "-c", launcher, str(read_fd), *command],
-                                     cwd=lease["worktree"], env=env, start_new_session=True,
-                                     pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                signal.signal(number, signal.SIG_IGN if number == signal.SIGHUP else
+                              lambda received, _frame: pending.append(received))
+            child_possible = True
+            if permit is not None:
+                permit["complete"] = False
+            try:
+                child = subprocess.Popen([sys.executable, "-c", launcher, str(read_fd), *command],
+                                         cwd=lease["worktree"], env=env, start_new_session=True,
+                                         pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except OSError:
+                # Popen reaps a failed exec before reporting its OSError. We use
+                # no preexec_fn; an interrupted/unknown launch remains uncertain.
+                child_possible = False
+                if permit is not None:
+                    permit["complete"] = True
+                raise
             pool.set_session(lease["lease_id"], lease["generation"], lease["worktree"], job, child.pid)
-            identity = process_identity(child.pid)
-            def forward_interrupt(_signal, _frame):
-                if process_alive(identity):
-                    os.killpg(child.pid, signal.SIGINT)
-            signal.signal(signal.SIGINT, forward_interrupt)
-            # HTTP handoff is checked continuously. Unknown listeners are never signalled.
+            supervisor = process_identity()
+            def forward_stop(number, _frame):
+                signal_owned_descendants(supervisor, number)
+            for number in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(number, forward_stop)
             if http:
                 reservation.close()
             os.write(write_fd, b"1")
@@ -2052,6 +2103,8 @@ def managed_run(pool, lease, command, env, *, http=False, auto_release=True, red
             write_fd = -1
             os.close(read_fd)
             read_fd = -1
+            for number in pending:
+                forward_stop(number, None)
             import selectors
             selector = selectors.DefaultSelector()
             selector.register(child.stdout, selectors.EVENT_READ)
@@ -2059,12 +2112,16 @@ def managed_run(pool, lease, command, env, *, http=False, auto_release=True, red
             result = None
             output_open = True
             has_children = True
+            next_listener_check = 0
             with output.open("wb") as log:
                 while has_children or output_open:
-                    if http and listener_ownership(lease["port"], os.getpid()) == "foreign":
-                        pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
-                                        "foreign listener during HTTP handoff; preserve all processes")
-                        http = False
+                    now = time.monotonic()
+                    if http and now >= next_listener_check:
+                        next_listener_check = now + 0.25
+                        if listener_ownership(lease["port"], os.getpid()) == "foreign":
+                            pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
+                                            "foreign listener during HTTP handoff; preserve all processes")
+                            http = False
                     for event, _ in selector.select(0.05):
                         chunk = os.read(event.fileobj.fileno(), 65536)
                         data = redactor.feed(chunk, final=not chunk)
@@ -2102,8 +2159,12 @@ def managed_run(pool, lease, command, env, *, http=False, auto_release=True, red
                 pool.release(lease["lease_id"], lease["generation"], lease["worktree"])
             return result if result >= 0 else 128 - result
         except BaseException:
-            pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
-                            "supervision interrupted; preserve all descendants and resources")
+            if job is not None:
+                if not child_possible:
+                    pool.end_job(lease["lease_id"], lease["generation"], lease["worktree"], job, 125)
+                else:
+                    pool.quarantine(lease["lease_id"], lease["generation"], lease["worktree"],
+                                    "supervision interrupted; preserve all descendants and resources")
             raise
         finally:
             reservation.close()
@@ -2212,9 +2273,29 @@ class SlotContext:
                 for key, value in parse_pairs(target).items():
                     if key.startswith("export "):
                         key = key[7:].strip()
+                    if kind == "test" and profile == "dev" and not key.startswith("TEST_DATABASE_"):
+                        continue
                     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
                         value = value[1:-1]
                     env[key] = value
+        # The existing renderer validated the entire supplemental map and values.
+        # Runtime bindings also work without template tokens, as in legacy run.
+        if project.get("SUPPLEMENTAL_SECRETS"):
+            bindings = [tuple(part.strip() for part in raw.split("\t"))
+                        for raw in Path(project["SUPPLEMENTAL_SECRETS"]).read_text().splitlines()
+                        if raw.strip() and not raw.lstrip().startswith("#")]
+            values = parse_pairs(self.secret_file)
+            for _, variable, _ in bindings:
+                env.pop(variable, None)
+            for kind, variable, secret_key in bindings:
+                if kind in ("all", profile):
+                    env[variable] = values[secret_key]
+        if profile == "test":
+            for key in list(env):
+                if key.startswith("DEV_DATABASE_"):
+                    env.pop(key)
+        if "DATABASE_URL" in env or any(key.startswith("PG") for key in env):
+            raise SlotError("alternate database connection variables are unsupported in managed mode")
         env.update(MIX_ENV=profile, MIX_BUILD_PATH=local_paths["MIX_BUILD_PATH"], MIX_DEPS_PATH=local_paths["MIX_DEPS_PATH"],
                    DEVCORE_PROJECT_CONF=self.project_file, DEVCORE_GLOBAL_CONF=self.global_file,
                    DEVCORE_SECRETS_FILE=self.secret_file, DEVCORE_CONFIG_DIR=str(self.central))
@@ -2245,7 +2326,11 @@ def verify_job(pool, lease_id, generation, job_id, worktree):
             raise SlotError("managed allocation is not owned by a live job")
         if os.getpid() not in descendants(process_metadata(), job["supervisor"]["pid"]):
             raise SlotError("allocation verifier is outside the managed child tree")
-        return {key: row[key] for key in ("project", "slot", "port", "lease_id", "generation", "worktree", "database", "role", "test_host", "test_port")}
+        if job.get("profile") not in ("dev", "test"):
+            raise SlotError("registered job profile is unavailable; preserve the allocation")
+        result = {key: row[key] for key in ("project", "slot", "port", "lease_id", "generation", "worktree", "database", "role", "test_host", "test_port")}
+        result["profile"] = job["profile"]
+        return result
 
 
 def slot_cli(arguments):
@@ -2316,13 +2401,20 @@ def slot_cli(arguments):
         if not command or not 0 <= args.wait <= 3600 or bool(args.lease) != bool(args.generation):
             raise SlotError("run needs a command, bounded wait, and both lease/generation if reusing a session")
         # A nested compatible run keeps the same job and never acquires another database.
+        required_markers = ("DEVCORE_SLOT_JOB", "DEVCORE_SLOT_LEASE", "DEVCORE_SLOT_GENERATION",
+                            "DEVCORE_SLOT_PROJECT", "DEVCORE_SLOT_WORKTREE")
+        if (any(key.startswith("DEVCORE_SLOT_") for key in os.environ)
+                and not all(os.environ.get(key) for key in required_markers)):
+            raise SlotError("partial managed job identity; no legacy fallback or new acquisition")
         nested = os.environ.get("DEVCORE_SLOT_JOB")
         if nested and not args.lease:
             row = verify_job(pool, os.environ.get("DEVCORE_SLOT_LEASE"), os.environ.get("DEVCORE_SLOT_GENERATION"), nested, context.worktree)
-            env = os.environ.copy()
-            env["MIX_ENV"] = args.profile
-            if args.profile == "dev" and not env.get("DEV_DATABASE_PASSWORD"):
+            if args.profile == "dev" and row["profile"] != "dev":
                 raise SlotError("a TEST job cannot become a shared DEV job")
+            env = context.environment(row, args.profile)
+            env.update(DEVCORE_SLOT_LEASE=row["lease_id"], DEVCORE_SLOT_GENERATION=row["generation"],
+                       DEVCORE_SLOT_JOB=nested, DEVCORE_SLOT_PROJECT=row["project"],
+                       NEW_YOU_PORT=str(row["port"]), DEVCORE_SLOT_WORKTREE=row["worktree"])
             os.execvpe(command[0], command, env)
         if args.lease:
             with pool.registry() as state:
@@ -2337,7 +2429,7 @@ def slot_cli(arguments):
             if args.retain and code == 0:
                 pool.retain(lease["lease_id"], lease["generation"], context.worktree)
             return code
-        except SlotError:
+        except (SlotError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt):
             # Never turn failed preparation into a ready resource.
             with pool.registry() as state:
                 row = pool.owned(state, lease["lease_id"], lease["generation"], context.worktree)
@@ -2433,7 +2525,7 @@ main() {
           rotate_all
           ;;
         run)
-          if [[ -n "$SLOT_POOL" ]]; then
+          if [[ -n "$SLOT_POOL" || -n "${!DEVCORE_SLOT_*}" ]]; then
             require_no_xtrace
             slots_main run "$@"
           else

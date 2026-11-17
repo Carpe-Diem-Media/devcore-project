@@ -31,7 +31,7 @@ DevCore injects non-secret `DEVCORE_SLOT_PROJECT`, `DEVCORE_SLOT_LEASE`, `DEVCOR
 devcore-project slots verify --lease LEASE --generation GENERATION --job JOB
 ```
 
-The verifier checks private registry ownership, exact generation, canonical current worktree, `in_use` state, a live supervisor's boot/PID/start identity and membership in its managed descendant tree. It returns only the expected project, slot, port, database, role and identifiers. Compare all supplied runtime TEST values against that result plus fixed `127.0.0.1:55433`; require a password without exposing it. Reject mixed legacy/managed identities, changed hosts/ports/users/database names and `MIX_TEST_PARTITION`. Keep production's separate configuration path and existing production safeguards intact. A forged environment alone must not make an unrelated process eligible.
+The verifier checks private registry ownership, exact generation, canonical current worktree, `in_use` state, a live supervisor's boot/PID/start identity and membership in its managed descendant tree. It also reports the registered originating DEV/TEST profile. Nested calls rebuild and verify the allocation rather than trusting mutable child database variables; TEST-origin jobs cannot escalate to DEV. Partial markers or a substituted non-opt-in declaration must fail closed. It returns only the expected project, slot, port, database, role and identifiers. Compare all supplied runtime TEST values against that result plus fixed `127.0.0.1:55433`; require a password without exposing it. Reject mixed legacy/managed identities, changed hosts/ports/users/database names and `MIX_TEST_PARTITION`. Keep production's separate configuration path and existing production safeguards intact. A forged environment alone must not make an unrelated process eligible.
 
 `config/runtime.exs` currently uses LocalConfig for DEV and TEST. Update its worktree/port seam without broad DATABASE_URL acceptance. `test/support/proof/result.ex` has an independent database identity check; update it to the same verified contract rather than adding a second permissive rule. Public LocalConfig functions need appropriate documentation/specs and focused failure tests under NewYou's conventions.
 
@@ -48,7 +48,7 @@ Inspect at least these current seams:
 
 Assert actual database/role/endpoint identity in child paths, not only marker propagation. Nested compatible DevCore calls reuse the active job. Preserve helper port 0 instead of consuming a second fixed slot. Audit intentional committed writes outside Sandbox rollback and teardown attribution. Do not clean another fixture's rows or treat a retained shared database as disposable.
 
-The supervisor covers all descendants until they exit, even after launcher loss. An abnormal supervisor loss quarantines resources; it does not terminate survivors. Do not modify active agents to adopt the allocator. Only consenting new sessions switch.
+The Linux supervisor requires child-subreaper and pidfd support and covers all descendants until they exit, even after launcher loss. SIGHUP detaches; SIGINT/TERM stop only verified owned descendants while supervision continues. An abnormal supervisor loss quarantines resources; it does not terminate survivors. Do not modify active agents to adopt the allocator. Only consenting new sessions switch.
 
 ## Worktree builds and PLTs
 

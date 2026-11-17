@@ -403,6 +403,94 @@ class CommandTests(unittest.TestCase):
                 self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy())
         self.assertEqual(self.pool.status()[0]["state"], "quarantined")
 
+    def test_missing_kernel_pidfd_support_fails_before_job_launch(self):
+        from unittest.mock import patch
+        import errno
+        with patch.object(self.m.os, "pidfd_open", side_effect=OSError(errno.ENOSYS, "synthetic unsupported kernel")):
+            with self.assertRaisesRegex(self.m.SlotError, "pidfd"):
+                self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy())
+        self.assertEqual(self.pool.status()[0]["jobs"], {})
+
+    def test_term_stops_owned_orphan_after_launcher_exit_and_preserves_unknown_process(self):
+        import signal
+        import time
+        ready, stopped = self.root / "signal-ready", self.root / "signal-stopped"
+        child_script = self.root / "signal-child.py"
+        child_script.write_text("import os,signal,time\n"
+            "pid=os.fork()\nif pid: os._exit(0)\nos.setsid()\n"
+            f"def stop(*_):\n    open({str(stopped)!r},'w').write('term')\n    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM,stop)\n"
+            f"open({str(ready)!r},'w').write(str(os.getpid()))\ntime.sleep(10)\n")
+        runner = self.root / "signal-runner.py"
+        runner.write_text("from pathlib import Path\nimport types,os\n"
+            f"source=Path({str(TOOL)!r}).read_text().split({BEGIN!r},1)[1].split({END!r},1)[0]\n"
+            "m=types.ModuleType('slots');exec(source,m.__dict__)\n"
+            f"pool=m.Pool(Path({str(self.pool.root)!r}),m.newyou_contract(),None)\n"
+            "lease=pool.status()[0]\n"
+            f"raise SystemExit(m.managed_run(pool,lease,['python3',{str(child_script)!r}],os.environ.copy(),auto_release=False))\n")
+        unknown = subprocess.Popen(["python3", "-c", "import time;time.sleep(10)"])
+        process = subprocess.Popen(["python3", str(runner)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        owned_identity = None
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            owned_identity = self.m.process_identity(int(ready.read_text()))
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=2), 0)
+            self.assertTrue(stopped.exists())
+            self.assertIsNone(unknown.poll())
+            self.assertEqual(self.pool.status()[0]["state"], "ready")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+            if owned_identity and self.m.process_alive(owned_identity):
+                try:
+                    fd = os.pidfd_open(owned_identity["pid"])
+                    try:
+                        if self.m.process_alive(owned_identity):
+                            signal.pidfd_send_signal(fd, signal.SIGTERM)
+                    finally:
+                        os.close(fd)
+                except ProcessLookupError:
+                    pass
+            unknown.terminate()
+            unknown.wait(timeout=2)
+
+    def test_known_prelaunch_failures_do_not_strand_heavy_permits(self):
+        from unittest.mock import patch
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", self.lease["port"]))
+            with self.assertRaises(self.m.SlotError):
+                self.m.managed_run(self.pool, self.lease, ["true"], os.environ.copy(), heavy=True)
+        receipts = list((self.pool.root / "heavy").glob("*.json"))
+        self.assertTrue(receipts)
+        self.assertTrue(all(json.loads(path.read_text())["state"] == "free" for path in receipts))
+        lease = self.pool.acquire(str(self.root))
+        with patch.object(self.m.subprocess, "Popen", side_effect=OSError("synthetic launch failure")):
+            with self.assertRaises(OSError):
+                self.m.managed_run(self.pool, lease, ["true"], os.environ.copy(), heavy=True)
+        self.assertTrue(all(json.loads(path.read_text())["state"] == "free" for path in receipts))
+        row = next(row for row in self.pool.status() if row["lease_id"] == lease["lease_id"])
+        self.assertEqual(row["state"], "retained")
+        self.assertEqual(row["jobs"], {})
+
+    def test_listener_checks_are_bounded_and_foreign_handoff_quarantines(self):
+        from unittest.mock import patch
+        calls = []
+        with patch.object(self.m, "listener_ownership", side_effect=lambda *_: calls.append(1) or "absent"):
+            self.assertEqual(self.m.managed_run(self.pool, self.lease,
+                ["python3", "-c", "import time;time.sleep(0.6)"], os.environ.copy(),
+                http=True, auto_release=False), 0)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertLessEqual(len(calls), 4)
+        with patch.object(self.m, "listener_ownership", return_value="foreign"):
+            self.assertEqual(self.m.managed_run(self.pool, self.lease, ["true"],
+                os.environ.copy(), http=True, auto_release=False), 0)
+        self.assertEqual(self.pool.status()[0]["state"], "quarantined")
+
     def test_cli_has_opt_in_commands_without_changing_installed_tool(self):
         result = subprocess.run([str(TOOL), "slots", "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -502,6 +590,101 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaises(self.m.SlotError):
             self.context.secrets.create(row)
 
+
+    def test_environment_setup_errors_retain_exact_automatic_lease(self):
+        from unittest.mock import patch
+        errors = (subprocess.TimeoutExpired("synthetic-renderer", 1), OSError("synthetic setup failure"), KeyboardInterrupt())
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                previous = {row["lease_id"] for row in self.context.pool.status()}
+                with patch.object(self.m, "SlotContext", return_value=self.context), \
+                     patch.object(self.context, "environment", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        self.m.slot_cli(["run", "test", "--", "true"])
+                acquired = [row for row in self.context.pool.status() if row["lease_id"] not in previous]
+                self.assertEqual(len(acquired), 1)
+                self.assertEqual(acquired[0]["state"], "retained")
+                self.assertEqual(acquired[0]["jobs"], {})
+
+    def test_nested_run_rebuilds_database_binding_and_cannot_escalate_test_to_dev(self):
+        output = self.fixture.root / "nested-observed.json"
+        script = """import os,sys,subprocess,json
+os.environ.update(TEST_DATABASE_NAME='new_you_test',TEST_DATABASE_USERNAME='new_you_test',
+                  DATABASE_URL='postgres://unrelated',PGDATABASE='new_you_dev',
+                  DEV_DATABASE_PASSWORD='forged',MIX_ENV='dev',DEVCORE_SLOT_PROJECT='forged',\n                  DEVCORE_SLOT_WORKTREE='/tmp/forged',NEW_YOU_PORT='4220')
+code='import os,json;print(json.dumps({k:os.environ.get(k) for k in ["TEST_DATABASE_NAME","TEST_DATABASE_USERNAME","DATABASE_URL","PGDATABASE","DEV_DATABASE_PASSWORD","DEVCORE_SLOT_JOB","DEVCORE_SLOT_PROJECT","DEVCORE_SLOT_WORKTREE","NEW_YOU_PORT"]}))'
+test=subprocess.run([sys.argv[1],'run','test','--','python3','-c',code],capture_output=True,text=True)
+dev=subprocess.run([sys.argv[1],'run','dev','--','true'],capture_output=True,text=True)
+generation=os.environ['DEVCORE_SLOT_GENERATION']
+os.environ['DEVCORE_SLOT_GENERATION']='0'*32
+stale=subprocess.run([sys.argv[1],'run','test','--','true'],capture_output=True,text=True)
+os.environ['DEVCORE_SLOT_GENERATION']=generation
+os.environ.pop('DEVCORE_SLOT_JOB')
+partial=subprocess.run([sys.argv[1],'run','test','--','true'],capture_output=True,text=True)
+json.dump({'test_exit':test.returncode,'env':json.loads(test.stdout),'dev_exit':dev.returncode,
+           'stale_exit':stale.returncode,'partial_exit':partial.returncode},open(sys.argv[2],'w'))
+"""
+        env = self.context.environment(self.lease, "test")
+        self.assertEqual(self.m.managed_run(self.context.pool, self.lease,
+            ["python3", "-c", script, str(TOOL), str(output)], env, auto_release=False), 0)
+        observed = json.loads(output.read_text())
+        self.assertEqual(observed["test_exit"], 0)
+        self.assertEqual(observed["env"]["TEST_DATABASE_NAME"], self.lease["database"])
+        self.assertEqual(observed["env"]["TEST_DATABASE_USERNAME"], self.lease["role"])
+        for key in ("DATABASE_URL", "PGDATABASE", "DEV_DATABASE_PASSWORD"):
+            self.assertIsNone(observed["env"][key])
+        self.assertTrue(observed["env"]["DEVCORE_SLOT_JOB"])
+        self.assertNotEqual(observed["dev_exit"], 0)
+        self.assertNotEqual(observed["stale_exit"], 0)
+        self.assertNotEqual(observed["partial_exit"], 0)
+        self.assertEqual(observed["env"]["DEVCORE_SLOT_PROJECT"], "new_you")
+        self.assertEqual(observed["env"]["DEVCORE_SLOT_WORKTREE"], str(self.fixture.project.resolve()))
+        self.assertEqual(observed["env"]["NEW_YOU_PORT"], str(self.lease["port"]))
+
+    def test_managed_markers_cannot_fall_back_through_a_legacy_declaration(self):
+        legacy = self.fixture.project / ".devcore/legacy.conf"
+        legacy.write_text(Path(self.context.project_file).read_text().replace("SLOT_POOL=.devcore/slots.json\n", ""))
+        (self.fixture.project / ".env.test").write_text("TEST_DATABASE_NAME=new_you_test\n")
+        env = self.fixture.env()
+        env.update(DEVCORE_PROJECT_CONF=str(legacy), DEVCORE_SLOT_JOB="synthetic-job")
+        result = subprocess.run([str(TOOL), "run", "test", "--", "true"],
+                                cwd=self.fixture.project, env=env, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has not opted in", result.stderr)
+
+    def test_rendered_database_aliases_are_rejected_after_merge(self):
+        # Resolve the fixture's actual TEST template rather than assuming a name.
+        row = next(line.split("\t") for line in (self.fixture.project / ".devcore/render-map.tsv").read_text().splitlines() if line.startswith("test\t"))
+        template = self.fixture.project / row[1]
+        original = template.read_text()
+        for variable in ("DATABASE_URL", "PGDATABASE"):
+            with self.subTest(variable=variable):
+                template.write_text(original + f"\n{variable}=unrelated\n")
+                with self.assertRaisesRegex(self.m.SlotError, "alternate database"):
+                    self.context.environment(self.lease, "test")
+        template.write_text(original)
+
+    def test_supplemental_profiles_purge_inheritance_and_apply_without_template_tokens(self):
+        f = self.fixture
+        mapping = f.project / ".devcore/supplemental.tsv"
+        mapping.write_text("dev\tDEV_ONLY_TOKEN\tSYNTHETIC_DEV_TOKEN\n"
+                           "test\tTEST_ONLY_TOKEN\tSYNTHETIC_TEST_TOKEN\n"
+                           "all\tCOMMON_TOKEN\tSYNTHETIC_COMMON_TOKEN\n")
+        with f.secrets.open("a") as stream:
+            stream.write("SYNTHETIC_DEV_TOKEN=synthetic-dev\nSYNTHETIC_TEST_TOKEN=synthetic-test\nSYNTHETIC_COMMON_TOKEN=synthetic-common\n")
+        self.context.project["SUPPLEMENTAL_SECRETS"] = str(mapping)
+        row = next(line.split("\t") for line in (f.project / ".devcore/render-map.tsv").read_text().splitlines() if line.startswith("test\t"))
+        template = f.project / row[1]
+        template.write_text(template.read_text() + "\nTEST_ONLY_TOKEN={{TEST_ONLY_TOKEN}}\n")
+        os.environ.update(DEV_ONLY_TOKEN="wrong-inherited-dev", TEST_ONLY_TOKEN="wrong-inherited-test")
+        dev = self.context.environment(self.lease, "dev")
+        test = self.context.environment(self.lease, "test")
+        self.assertEqual(dev.get("DEV_ONLY_TOKEN"), "synthetic-dev")
+        self.assertNotIn("TEST_ONLY_TOKEN", dev)
+        self.assertEqual(test.get("TEST_ONLY_TOKEN"), "synthetic-test")
+        self.assertNotIn("DEV_ONLY_TOKEN", test)
+        self.assertEqual(dev.get("COMMON_TOKEN"), "synthetic-common")
+        self.assertEqual(test.get("COMMON_TOKEN"), "synthetic-common")
 
     def test_managed_all_profile_is_rejected_without_acquiring_or_using_shared_test(self):
         before_registry = (self.context.pool.root / "registry.json").read_bytes()
