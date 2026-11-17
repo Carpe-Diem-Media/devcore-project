@@ -27,6 +27,8 @@ mise exec -- devcore-project run test -- mix check.deep
 mise exec -- devcore-project run dev -- mix phx.server
 ```
 
+Managed mode supports `run dev` and `run test`. It rejects `run all` before acquisition because combining legacy profiles could restore shared TEST credentials. Projects without `SLOT_POOL` keep their existing `run all` behavior.
+
 With `SLOT_POOL` enabled, an ordinary `run` acquires a slot, provisions its fresh TEST generation, builds a command-local environment, supervises its children, then releases on success. A failed command retains the database and diagnosis. There is no shared TEST fallback. Twenty occupied, retained, quarantined or externally blocked slots produce an explicit exhausted error. `slots acquire --wait SECONDS` supports a bounded wait up to 3600 seconds; interruption cancels the waiter without acquiring a slot. The default is immediate exhaustion.
 
 Explicit session control uses non-secret identifiers printed by acquisition and status:
@@ -56,13 +58,13 @@ A free port alone never establishes database ownership. Acquisition skips occupi
 
 Process identity combines PID, Linux boot ID and start time. Registry changes use fsync and atomic rename under flock. Recovery never trusts an elapsed heartbeat. `slots recover` quarantines interrupted preparation, cleanup or dead supervisors. A killed supervisor can leave live descendants, so recovery does not reclaim that allocation even when its original PID or HTTP listener is gone. This conservative quarantine also covers machine restart. No automatic repair deletes uncertain resources.
 
-If ordinary cleanup failed with no jobs, its exact owner may retry the same cleanup after the problem resolves:
+If cleanup failed before removing either recorded identity, with no jobs, its exact owner may retry after the problem resolves:
 
 ```sh
 devcore-project slots recover --lease LEASE --generation GENERATION
 ```
 
-The retry repeats every endpoint, OID, ownership and client guard. It cannot recover interrupted preparation or supervisor loss. Those cases require a separately reviewed exact-target reconciliation procedure; editing the registry to force availability is unsupported.
+The retry repeats every endpoint, OID, ownership and client guard. It cannot recover interrupted preparation, supervisor loss or partial cleanup where the database was removed but role deletion failed. A missing catalog identity remains quarantined; the tool never adopts or deletes a residual role from its name alone. Those cases require a separately reviewed exact-target reconciliation procedure; editing the registry to force availability is unsupported.
 
 ## Disposable database boundary
 

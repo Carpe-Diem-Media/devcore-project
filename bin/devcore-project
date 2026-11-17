@@ -1648,7 +1648,7 @@ class Pool:
         with self.registry() as state:
             row = self.owned(state, lease_id, generation, worktree)
             if failed:
-                row.update(state="quarantined", cleanup_retry=True, diagnosis="cleanup uncertain or clients remain; no forced termination")
+                row.update(state="quarantined", cleanup_retry=True, diagnosis="cleanup uncertain or clients remain; retry requires both recorded identities; partial removal needs exact-target review")
             else:
                 row.update(state="free", diagnosis="exact registered generation removed")
         if failed:
@@ -2249,6 +2249,8 @@ def verify_job(pool, lease_id, generation, job_id, worktree):
 
 
 def slot_cli(arguments):
+    if arguments[:2] == ["run", "all"]:
+        raise SlotError("managed mode supports only dev and test; run all is unavailable; no resources acquired")
     parser = argparse.ArgumentParser(prog="devcore-project slots")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("manifest", help="print the bounded activation/cleanup contract and digest")

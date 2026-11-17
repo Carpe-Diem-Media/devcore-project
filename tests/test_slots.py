@@ -503,6 +503,17 @@ class EnvironmentTests(unittest.TestCase):
             self.context.secrets.create(row)
 
 
+    def test_managed_all_profile_is_rejected_without_acquiring_or_using_shared_test(self):
+        before_registry = (self.context.pool.root / "registry.json").read_bytes()
+        before_secrets = self.fixture.secrets.read_bytes()
+        result = subprocess.run([str(TOOL), "run", "all", "--", "true"],
+                                cwd=self.fixture.project, env=self.fixture.env(),
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("managed mode supports only dev and test; run all is unavailable", result.stderr)
+        self.assertEqual((self.context.pool.root / "registry.json").read_bytes(), before_registry)
+        self.assertEqual(self.fixture.secrets.read_bytes(), before_secrets)
+
     def test_automatic_cli_and_nested_run_keep_managed_identity_and_stdin(self):
         f = self.fixture
         docker = f.mock_bin / "docker"
