@@ -21,7 +21,9 @@ def module():
     if BEGIN not in source:
         return None
     result = types.ModuleType("devcore_slots")
-    exec(compile(source.split(BEGIN, 1)[1].split(END, 1)[0], str(TOOL), "exec"), result.__dict__)
+    before, embedded = source.split(BEGIN, 1)
+    aligned = "\n" * (before.count("\n") + 1) + embedded.split(END, 1)[0]
+    exec(compile(aligned, str(TOOL), "exec"), result.__dict__)
     return result
 
 
@@ -284,6 +286,24 @@ class PostgresAdapterTests(unittest.TestCase):
         self.adapter.executor = lambda sql: "t"
         with self.assertRaisesRegex(self.m.SlotError, "already exists"):
             self.adapter.prepare(self.lease)
+
+    def test_catalog_oids_have_numeric_json_types_at_postgres_boundary(self):
+        def postgres_json(statement):
+            if "json_build_object" in statement:
+                row = self.catalog.copy()
+                for key, expression in (("database_oid", "d.oid::bigint"),
+                                        ("role_oid", "r.oid::bigint"),
+                                        ("owner_oid", "d.datdba::bigint")):
+                    # PostgreSQL emits built-in OID as JSON text. Explicit int8
+                    # casts preserve the strict numeric metadata contract.
+                    if expression not in statement:
+                        row[key] = str(row[key])
+                return json.dumps(row)
+            return self.sql(statement)
+        self.adapter.executor = postgres_json
+        catalog = self.adapter.prepare(self.lease)
+        self.assertIs(type(catalog["database_oid"]), int)
+        self.assertIs(type(catalog["role_oid"]), int)
 
     def test_cleanup_checks_exact_catalog_and_never_forces(self):
         self.lease["catalog"]["container_id"] = "a" * 64

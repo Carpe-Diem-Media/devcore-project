@@ -1724,7 +1724,7 @@ class Postgres:
         database, role = sql_literal(row["database"]), sql_literal(row["role"])
         result = self.executor(f"""
 SELECT json_build_object(
- 'database_oid', d.oid, 'role_oid', r.oid, 'owner_oid', d.datdba,
+ 'database_oid', d.oid::bigint, 'role_oid', r.oid::bigint, 'owner_oid', d.datdba::bigint,
  'database_comment', shobj_description(d.oid, 'pg_database'),
  'role_comment', shobj_description(r.oid, 'pg_authid'),
  'clients', (SELECT count(*) FROM pg_stat_activity WHERE datid = d.oid),
