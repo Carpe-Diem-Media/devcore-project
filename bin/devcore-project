@@ -1341,6 +1341,7 @@ def newyou_contract():
         "database_prefix": "dc_new_you_s", "dev_database": "new_you_dev",
         "legacy_test_database": "new_you_test",
         "test_container": "dev-core-postgres-test-1", "admin_role": "devcore_admin",
+        "database_owner": "devcore_admin",
     }
 
 
@@ -1742,13 +1743,15 @@ class Postgres:
         result = self.executor(f"""
 SELECT json_build_object(
  'database_oid', d.oid::bigint, 'role_oid', r.oid::bigint, 'owner_oid', d.datdba::bigint,
+ 'admin_oid', a.oid::bigint,
  'database_comment', shobj_description(d.oid, 'pg_database'),
  'role_comment', shobj_description(r.oid, 'pg_authid'),
  'clients', (SELECT count(*) FROM pg_stat_activity WHERE datid = d.oid),
  'privileged', r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls,
  'memberships', (SELECT count(*) FROM pg_auth_members WHERE roleid=r.oid OR member=r.oid),
- 'other_databases', (SELECT count(*) FROM pg_database WHERE datdba=r.oid AND oid<>d.oid))
+ 'other_databases', (SELECT count(*) FROM pg_database WHERE datdba=r.oid))
 FROM pg_database d JOIN pg_roles r ON r.rolname={role}
+JOIN pg_roles a ON a.rolname={sql_literal(self.contract['database_owner'])}
 WHERE d.datname={database};
 """)
         try:
@@ -1758,15 +1761,16 @@ WHERE d.datname={database};
 
     def verify_catalog(self, row, catalog, cleanup=False):
         comment = ownership_comment(row)
-        if (catalog.get("owner_oid") != catalog.get("role_oid")
+        if (catalog.get("owner_oid") != catalog.get("admin_oid")
+                or catalog.get("owner_oid") == catalog.get("role_oid")
                 or catalog.get("database_comment") != comment or catalog.get("role_comment") != comment
                 or catalog.get("privileged") is not False or catalog.get("memberships") != 0
                 or catalog.get("other_databases") != 0):
             raise SlotError("catalog ownership or least-privilege identity differs; refusing adoption or cleanup")
         if cleanup and (catalog.get("clients") != 0
-                        or any(catalog.get(key) != row["catalog"].get(key) for key in ("database_oid", "role_oid"))):
+                        or any(catalog.get(key) != row["catalog"].get(key) for key in ("database_oid", "role_oid", "owner_oid"))):
             raise SlotError("remaining clients or stale catalog generation; cleanup refused")
-        for key in ("database_oid", "role_oid"):
+        for key in ("database_oid", "role_oid", "owner_oid", "admin_oid"):
             if type(catalog.get(key)) is not int or catalog[key] <= 0:
                 raise SlotError("invalid catalog identity")
 
@@ -1795,14 +1799,20 @@ WHERE d.datname={database};
         self.executor(f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION "
                       f"NOBYPASSRLS PASSWORD {sql_literal(password)};\nCOMMENT ON ROLE {role} IS {comment};")
         # CREATE without IF NOT EXISTS deliberately fails on a race rather than adopting it.
-        self.executor(f"CREATE DATABASE {database} OWNER {role} TEMPLATE template0 ALLOW_CONNECTIONS false;")
+        # Runtime credentials may create migration objects, but must never own
+        # the database or acquire grant options that reopen cross-slot CONNECT.
+        self.executor(f"CREATE DATABASE {database} OWNER {self.contract['database_owner']} "
+                      "TEMPLATE template0 ALLOW_CONNECTIONS false;")
         self.executor(f"COMMENT ON DATABASE {database} IS {comment};\n"
                       f"REVOKE ALL ON DATABASE {database} FROM PUBLIC;\n"
                       f"GRANT CONNECT, TEMPORARY ON DATABASE {database} TO {role};\n"
-                      f"ALTER DATABASE {database} ALLOW_CONNECTIONS true;")
+                      f"ALTER DATABASE {database} ALLOW_CONNECTIONS true;\n"
+                      f"\\connect {database}\n"
+                      f"GRANT USAGE, CREATE ON SCHEMA public TO {role};")
         catalog = self.catalog(row)
         self.verify_catalog(row, catalog)
-        return {"database_oid": catalog["database_oid"], "role_oid": catalog["role_oid"], "container_id": container_id}
+        return {"database_oid": catalog["database_oid"], "role_oid": catalog["role_oid"],
+                "owner_oid": catalog["owner_oid"], "container_id": container_id}
 
     def cleanup(self, row):
         self.validate(row)

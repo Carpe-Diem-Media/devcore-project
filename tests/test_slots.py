@@ -277,7 +277,7 @@ class PostgresAdapterTests(unittest.TestCase):
         self.pool.enable(self.pool.manifest_digest(), "synthetic-approval")
         self.lease = self.pool.acquire(str(self.root))
         self.statements = []
-        self.catalog = {"database_oid": 1001, "role_oid": 2001, "owner_oid": 2001,
+        self.catalog = {"database_oid": 1001, "role_oid": 2001, "owner_oid": 10, "admin_oid": 10,
                         "database_comment": self.m.ownership_comment(self.lease),
                         "role_comment": self.m.ownership_comment(self.lease),
                         "clients": 0, "privileged": False, "memberships": 0, "other_databases": 0}
@@ -307,6 +307,29 @@ class PostgresAdapterTests(unittest.TestCase):
         self.assertIn("ALLOW_CONNECTIONS false", sql)
         self.assertNotIn("ALTER ROLE new_you_test", sql)
         self.assertEqual(catalog["container_id"], "a" * 64)
+
+    def test_runtime_cannot_own_database_or_delegate_connection_privileges(self):
+        self.adapter.prepare(self.lease)
+        sql = "\n".join(self.statements)
+        self.assertIn(f"CREATE DATABASE {self.lease['database']} OWNER devcore_admin", sql)
+        self.assertIn(f"GRANT CONNECT, TEMPORARY ON DATABASE {self.lease['database']} TO {self.lease['role']}", sql)
+        self.assertIn(f"GRANT USAGE, CREATE ON SCHEMA public TO {self.lease['role']}", sql)
+        self.assertNotIn("WITH GRANT OPTION", sql)
+
+    def test_runtime_database_ownership_is_rejected_before_cleanup_mutations(self):
+        self.lease["catalog"]["container_id"] = "a" * 64
+        self.catalog["admin_oid"] = 10
+        self.catalog["owner_oid"] = self.catalog["role_oid"]
+        with self.assertRaises(self.m.SlotError):
+            self.adapter.cleanup(self.lease)
+        self.assertFalse(any("DROP " in x or "ALTER " in x for x in self.statements))
+
+    def test_changed_administrative_owner_oid_cannot_authorize_cleanup(self):
+        self.lease["catalog"].update(container_id="a" * 64, owner_oid=10)
+        self.catalog.update(owner_oid=20, admin_oid=20)
+        with self.assertRaises(self.m.SlotError):
+            self.adapter.cleanup(self.lease)
+        self.assertFalse(any("DROP " in x or "ALTER " in x for x in self.statements))
 
     def test_existing_identity_is_never_adopted(self):
         self.adapter.executor = lambda sql: "t"
@@ -347,7 +370,8 @@ class PostgresAdapterTests(unittest.TestCase):
                 row = self.catalog.copy()
                 for key, expression in (("database_oid", "d.oid::bigint"),
                                         ("role_oid", "r.oid::bigint"),
-                                        ("owner_oid", "d.datdba::bigint")):
+                                        ("owner_oid", "d.datdba::bigint"),
+                                        ("admin_oid", "a.oid::bigint")):
                     # PostgreSQL emits built-in OID as JSON text. Explicit int8
                     # casts preserve the strict numeric metadata contract.
                     if expression not in statement:
@@ -361,6 +385,7 @@ class PostgresAdapterTests(unittest.TestCase):
 
     def test_cleanup_checks_exact_catalog_and_never_forces(self):
         self.lease["catalog"]["container_id"] = "a" * 64
+        self.lease["catalog"]["owner_oid"] = 10
         self.adapter.cleanup(self.lease)
         sql = "\n".join(self.statements)
         self.assertIn("DROP DATABASE", sql)
@@ -371,7 +396,9 @@ class PostgresAdapterTests(unittest.TestCase):
 
     def test_cleanup_rejects_every_ownership_mismatch_before_mutation(self):
         self.lease["catalog"]["container_id"] = "a" * 64
+        self.lease["catalog"]["owner_oid"] = 10
         for key, bad in (("database_oid", 9), ("role_oid", 9), ("owner_oid", 9),
+                         ("admin_oid", 9),
                          ("database_comment", "foreign"), ("role_comment", "foreign"),
                          ("clients", 1), ("privileged", True), ("memberships", 1), ("other_databases", 1)):
             with self.subTest(key=key):
@@ -811,7 +838,7 @@ elif args[0]=='exec':
         rows=json.loads(Path(os.environ['MOCK_SLOT_REGISTRY']).read_text())['slots'].values()
         row=next(row for row in rows if row['database'] in sql)
         comment='devcore-slot:v1:new_you:'+row['lease_id']+':'+row['generation']+':'+hashlib.sha256(row['worktree'].encode()).hexdigest()+':'+row['manifest']
-        print(json.dumps(dict(database_oid=1000+row['slot'],role_oid=2000+row['slot'],owner_oid=2000+row['slot'],database_comment=comment,role_comment=comment,clients=0,privileged=False,memberships=0,other_databases=0)))
+        print(json.dumps(dict(database_oid=1000+row['slot'],role_oid=2000+row['slot'],owner_oid=10,admin_oid=10,database_comment=comment,role_comment=comment,clients=0,privileged=False,memberships=0,other_databases=0)))
     elif 'EXISTS' in sql:
         print('f')
 else:

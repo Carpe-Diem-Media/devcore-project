@@ -434,6 +434,31 @@ class PostgresIntegrationTests(unittest.TestCase):
                             "slot A could connect to protected legacy TEST")
         self.assertNotEqual(runtime(a, "CREATE DATABASE forbidden_extra_database").returncode, 0,
                             "runtime role unexpectedly had CREATEDB")
+        # Migration DDL is allowed, but database ACLs remain administrative.
+        # GRANT without a grant option can warn and return success, so inspect
+        # the effective boundary rather than relying only on its exit status.
+        original_acl = value(a, "SELECT datacl::text FROM pg_database WHERE datname=current_database()")
+        for grantee in ("PUBLIC", b["role"]):
+            runtime(a, f"GRANT CONNECT ON DATABASE {a['database']} TO {grantee}")
+            self.assertEqual(value(a, "SELECT datacl::text FROM pg_database WHERE datname=current_database()"), original_acl,
+                             "runtime role changed database ACL")
+            self.assertNotEqual(runtime(b, "SELECT 1", a["database"]).returncode, 0,
+                                "runtime role delegated access to its slot database")
+        self.assertEqual(value(a, "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()"),
+                         "devcore_admin")
+        self.assertEqual(value(a, "SELECT has_database_privilege(current_user, current_database(), 'CONNECT WITH GRANT OPTION')"), "f")
+        self.assertEqual(value(a, "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"), "f")
+        self.assertEqual(value(a, "SELECT count(*) FROM pg_database WHERE datdba=(SELECT oid FROM pg_roles WHERE rolname=current_user)"), "0")
+        self.assertNotEqual(runtime(a, "SET ROLE devcore_admin").returncode, 0,
+                            "runtime role could assume administrative ownership")
+        self.assertNotEqual(runtime(a, f"ALTER DATABASE {a['database']} OWNER TO {a['role']}").returncode, 0,
+                            "runtime role could take database ownership")
+        self.assertEqual(value(a, "BEGIN; CREATE TABLE migration_probe(id bigint PRIMARY KEY); "
+                              "ALTER TABLE migration_probe ADD COLUMN marker text; "
+                              "CREATE INDEX migration_probe_marker ON migration_probe(marker); "
+                              "CREATE FUNCTION migration_identity(integer) RETURNS integer LANGUAGE SQL "
+                              "AS 'SELECT $1'; CREATE TEMP TABLE temporary_probe(id integer); "
+                              "COMMIT; SELECT migration_identity(7);"), "7")
         # Independent connections keep committed markers. Cleanup removes only A.
         pool.release(a["lease_id"], a["generation"], str(paths[0]))
         self.assertEqual(value(b, "SELECT marker FROM isolation_probe"), "synthetic-b")

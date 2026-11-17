@@ -9,5 +9,6 @@
   "dev_database": "new_you_dev",
   "legacy_test_database": "new_you_test",
   "test_container": "dev-core-postgres-test-1",
-  "admin_role": "devcore_admin"
+  "admin_role": "devcore_admin",
+  "database_owner": "devcore_admin"
 }

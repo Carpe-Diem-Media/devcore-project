@@ -11,7 +11,8 @@
       "dev_database": "new_you_dev",
       "legacy_test_database": "new_you_test",
       "test_container": "dev-core-postgres-test-1",
-      "admin_role": "devcore_admin"
+      "admin_role": "devcore_admin",
+      "database_owner": "devcore_admin"
     },
     "registry": "/home/jcschoeman96/.config/dev-core/slots/new_you",
     "targets": [
@@ -146,8 +147,8 @@
       "unregistered targets"
     ]
   },
-  "sha256": "2aef1ff43076759edea2dc5f32b00cf80499c9c573f1085e8cf898c5788fe3e7",
-  "approval_text": "DEVCORE_SLOT_APPROVAL_V1\nmanifest-sha256: 2aef1ff43076759edea2dc5f32b00cf80499c9c573f1085e8cf898c5788fe3e7\nI authorize creation and automatic cleanup of only the registered NewYou disposable TEST generations described by this exact manifest. Existing databases and unknown sessions must remain untouched.",
+  "sha256": "3fb71d0ed24dfc4ab8ef75226916da624f5ca4a18343695a154733eb2a93e556",
+  "approval_text": "DEVCORE_SLOT_APPROVAL_V1\nmanifest-sha256: 3fb71d0ed24dfc4ab8ef75226916da624f5ca4a18343695a154733eb2a93e556\nI authorize creation and automatic cleanup of only the registered NewYou disposable TEST generations described by this exact manifest. Existing databases and unknown sessions must remain untouched.",
   "authorization_status": "NOT_AUTHORIZED",
   "installation_status": "NOT_INSTALLED"
 }
