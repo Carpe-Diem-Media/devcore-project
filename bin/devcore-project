@@ -313,6 +313,7 @@ load_project() {
   TEST_DB_NAME="$(kv_get "$PROJECT_CONF" TEST_DB_NAME)"
   DEV_SECRET_KEY="$(kv_get "$PROJECT_CONF" DEV_SECRET_KEY)"
   TEST_SECRET_KEY="$(kv_get "$PROJECT_CONF" TEST_SECRET_KEY)"
+  PG_EXTENSIONS="$(kv_get "$PROJECT_CONF" PG_EXTENSIONS)"
   TEST_ROLE_CREATEDB="$(kv_get "$PROJECT_CONF" TEST_ROLE_CREATEDB yes)"
   USE_REDIS="$(kv_get "$PROJECT_CONF" USE_REDIS yes)"
   REDIS_PREFIX="$(kv_get "$PROJECT_CONF" REDIS_PREFIX "$PROJECT_KEY")"
@@ -511,6 +512,7 @@ validate_secret_value() {
 }
 
 validate_project() {
+  [[ -z "$PG_EXTENSIONS" || "$PG_EXTENSIONS" == vector ]] || die "PG_EXTENSIONS must be empty or vector"
   [[ "$PROJECT_KEY" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "invalid PROJECT_KEY: $PROJECT_KEY"
   validate_identifier DEV_DB_ROLE "$DEV_DB_ROLE"
   validate_identifier DEV_DB_NAME "$DEV_DB_NAME"
@@ -625,7 +627,7 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')
 SQL
   } | docker exec -i "$container" \
       psql -X -q -v ON_ERROR_STOP=1 -U "$PG_ADMIN_ROLE" -d postgres \
-      -v role="$role" -v db="$db" -v create_flag="$create_flag" >/dev/null
+      -v role="$role" -v db="$db" -v create_flag="$create_flag" >/dev/null || return 1
 
   local owner
   owner="$(
@@ -638,6 +640,55 @@ SQL
   [[ "$owner" == "$role" ]] || die "database $db exists but owner is '$owner', expected '$role'; refusing implicit adoption"
 }
 
+vector_preflight() {
+  local label="$1" container="$2" available
+  available="$(docker exec "$container" psql -XqAt -v ON_ERROR_STOP=1 \
+    -U "$PG_ADMIN_ROLE" -d postgres \
+    -c "SELECT default_version FROM pg_catalog.pg_available_extensions WHERE name = 'vector'")" ||
+    die "$label PostgreSQL extension preflight failed"
+  [[ "$available" == 0.8.7 ]] || die "$label PostgreSQL requires vector 0.8.7 (available: ${available:-none})"
+}
+
+provision_vector() {
+  local container="$1" role="$2" db="$3"
+  docker exec -i "$container" psql -XqAt -v ON_ERROR_STOP=1 \
+    -U "$PG_ADMIN_ROLE" -d "$db" -v role="$role" -v db="$db" <<'SQL'
+BEGIN;
+SET LOCAL search_path = pg_catalog, pg_temp;
+CREATE SCHEMA IF NOT EXISTS devcore_extensions;
+SELECT n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+       AND NOT EXISTS (
+           SELECT FROM aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) AS acl
+           WHERE acl.privilege_type = 'CREATE' AND acl.grantee <> n.nspowner
+       ) AS protected
+FROM pg_namespace AS n WHERE n.nspname = 'devcore_extensions'
+\gset
+\if :protected
+\else
+DO $$BEGIN RAISE EXCEPTION 'devcore_extensions schema owner or CREATE grants are unsafe'; END$$;
+\endif
+GRANT USAGE ON SCHEMA devcore_extensions TO :"role";
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA devcore_extensions VERSION '0.8.7';
+SELECT n.nspname = 'devcore_extensions'
+       AND pg_get_userbyid(e.extowner) = current_user
+       AND EXISTS (SELECT FROM pg_available_extension_versions AS v
+                   WHERE v.name = e.extname AND v.version = e.extversion) AS valid_extension
+FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace
+WHERE e.extname = 'vector'
+\gset
+\if :valid_extension
+\else
+DO $$BEGIN RAISE EXCEPTION 'vector extension schema, ownership or version is invalid'; END$$;
+\endif
+ALTER ROLE :"role" IN DATABASE :"db" SET search_path TO "$user", public, devcore_extensions;
+SET LOCAL ROLE :"role";
+SELECT '[1,0]'::devcore_extensions.vector OPERATOR(devcore_extensions.<=>)
+       '[0,1]'::devcore_extensions.vector AS cosine_distance
+\gset
+COMMIT;
+SQL
+}
+
 provision_all() {
   local dev test
   dev="$(kv_get "$CENTRAL_SECRETS" "$DEV_SECRET_KEY")"
@@ -645,8 +696,17 @@ provision_all() {
   validate_secret_value DEV_DB_PASSWORD "$dev"
   validate_secret_value TEST_DB_PASSWORD "$test"
   provision_database "$PG_DEV_CONTAINER" "$DEV_DB_ROLE" "$DEV_DB_NAME" "$dev" no
+  if [[ "$PG_EXTENSIONS" == vector ]]; then
+    provision_vector "$PG_DEV_CONTAINER" "$DEV_DB_ROLE" "$DEV_DB_NAME" ||
+      die "DEV vector provisioning failed; TEST provisioning was skipped"
+  fi
   pass "DEV PostgreSQL role/database ready: $DEV_DB_ROLE / $DEV_DB_NAME"
-  provision_database "$PG_TEST_CONTAINER" "$TEST_DB_ROLE" "$TEST_DB_NAME" "$test" "$TEST_ROLE_CREATEDB"
+  (provision_database "$PG_TEST_CONTAINER" "$TEST_DB_ROLE" "$TEST_DB_NAME" "$test" "$TEST_ROLE_CREATEDB") ||
+    die "partial provisioning: DEV succeeded, TEST database provisioning failed"
+  if [[ "$PG_EXTENSIONS" == vector ]]; then
+    provision_vector "$PG_TEST_CONTAINER" "$TEST_DB_ROLE" "$TEST_DB_NAME" ||
+      die "partial provisioning: DEV succeeded, TEST vector provisioning failed"
+  fi
   pass "TEST PostgreSQL role/database ready: $TEST_DB_ROLE / $TEST_DB_NAME"
 }
 
@@ -823,15 +883,28 @@ SELECT current_user,
          WHERE m.member = r.oid OR m.roleid = r.oid)
   FROM pg_roles AS r
   JOIN pg_database AS d ON d.datname = current_database()
- WHERE r.rolname = current_user;"
+ WHERE r.rolname = current_user;
+SELECT names.name, coalesce(a.default_version, 'unavailable'),
+       coalesce(e.extversion, 'not installed'), coalesce(n.nspname, ''),
+       coalesce(pg_get_userbyid(e.extowner), ''),
+       coalesce(has_schema_privilege(n.oid, 'USAGE') AND NOT has_schema_privilege(n.oid, 'CREATE')
+         AND NOT EXISTS (
+           SELECT FROM aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) AS acl
+           WHERE acl.privilege_type = 'CREATE' AND acl.grantee <> n.nspowner
+         ) AND pg_get_userbyid(n.nspowner) = pg_get_userbyid(e.extowner), false)
+FROM (VALUES ('vector'), ('pg_trgm'), ('pgcrypto'), ('citext'), ('btree_gist'), ('unaccent')) AS names(name)
+LEFT JOIN pg_available_extensions AS a USING (name)
+LEFT JOIN pg_extension AS e ON e.extname = names.name
+LEFT JOIN pg_namespace AS n ON n.oid = e.extnamespace
+ORDER BY names.name;"
   if command -v psql >/dev/null 2>&1; then
     result="$(PGPASSWORD="$password" psql -X -qAt -h "$host" -p "$port" -U "$role" -d "$db" \
-      -F '|' -c "$query")"
+      -v ON_ERROR_STOP=1 -F '|' -c "$query")"
   else
     result="$(printf '%s\n' "$password" | docker exec -i "$container" \
       sh -c 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql "$@"' \
       devcore-psql -X -qAt -h 127.0.0.1 -U "$role" -d "$db" \
-      -F '|' -c "$query")"
+      -v ON_ERROR_STOP=1 -F '|' -c "$query")"
   fi
   local -a fields
   IFS='|' read -r -a fields <<< "$result"
@@ -846,6 +919,23 @@ SELECT current_user,
      "${fields[9]}" == "f" && "${fields[10]}" == "0" ]] || \
     die "$label PostgreSQL role, ownership, or membership invariant failed"
   pass "$label PostgreSQL authentication: $role / $db (server version ${fields[2]})"
+  local extension available installed schema owner protected vector_verified=no
+  while IFS='|' read -r extension available installed schema owner protected; do
+    [[ -n "$extension" ]] || continue
+    printf '%s PostgreSQL extension %s: available=%s installed=%s\n' \
+      "$label" "$extension" "$available" "$installed"
+    if [[ "$extension" == vector && "$PG_EXTENSIONS" == vector ]]; then
+      [[ "$available" != unavailable && "$installed" != "not installed" &&
+         "$schema" == devcore_extensions && "$owner" == "$PG_ADMIN_ROLE" && "$protected" == t ]] ||
+        die "$label PostgreSQL vector availability, installation, schema or ownership check failed"
+      vector_verified=yes
+      if [[ "$available" != "$installed" ]]; then
+        printf '%s PostgreSQL vector version drift: available=%s installed=%s\n' "$label" "$available" "$installed" >&2
+      fi
+    fi
+  done <<< "$(sed '1d' <<< "$result")"
+  [[ "$PG_EXTENSIONS" != vector || "$vector_verified" == yes ]] ||
+    die "$label PostgreSQL vector diagnostic result missing"
 }
 
 redis_doctor() {
@@ -895,6 +985,7 @@ doctor_all() {
 print_plan() {
   printf 'Project: %s\n' "$PROJECT_KEY"
   printf 'DEV PostgreSQL:  %s@%s:%s/%s\n' "$DEV_DB_ROLE" "$PG_DEV_HOST" "$PG_DEV_PORT" "$DEV_DB_NAME"
+  printf 'Required PostgreSQL extensions: %s\n' "${PG_EXTENSIONS:-none}"
   printf 'TEST PostgreSQL: %s@%s:%s/%s (CREATEDB=%s)\n' "$TEST_DB_ROLE" "$PG_TEST_HOST" "$PG_TEST_PORT" "$TEST_DB_NAME" "$TEST_ROLE_CREATEDB"
   if [[ "$USE_REDIS" == "yes" ]]; then
     printf 'Redis DEV:       %s:%s namespace=%s:dev\n' "$REDIS_DEV_HOST" "$REDIS_DEV_PORT" "$REDIS_PREFIX"
@@ -2561,12 +2652,12 @@ main() {
       cmd_init "$@"
       ;;
     plan|activate|doctor|render|rotate|run)
+      load_project
+      validate_project
       case "$cmd" in
         activate|render|rotate) write_global_defaults ;;
       esac
       load_global
-      load_project
-      validate_project
       check_render_contract
       case "$cmd" in
         plan)
@@ -2577,6 +2668,10 @@ main() {
           need_cmd docker
           require_no_xtrace
           preflight_operational_contract
+          if [[ "$PG_EXTENSIONS" == vector ]]; then
+            vector_preflight DEV "$PG_DEV_CONTAINER"
+            vector_preflight TEST "$PG_TEST_CONTAINER"
+          fi
           ensure_secret_pair
           provision_all
           render_all

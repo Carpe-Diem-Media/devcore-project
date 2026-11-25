@@ -52,6 +52,13 @@ jobs:
         env:
           DEVCORE_RUN_POSTGRES_INTEGRATION: "1"
         run: python3 -m unittest tests.test_postgres_integration -v
+      - name: Build PostgreSQL extension image
+        run: docker build -t devcore-postgres:18.7-vector0.8.7 postgres
+      - name: Run disposable integration on the extension image
+        env:
+          DEVCORE_RUN_POSTGRES_INTEGRATION: "1"
+          DEVCORE_POSTGRES_TEST_IMAGE: devcore-postgres:18.7-vector0.8.7
+        run: python3 -m unittest tests.test_postgres_integration -v
       - name: Remove integration containers
         if: always()
         run: |
