@@ -61,7 +61,7 @@ class IntegrationFixtureTests(unittest.TestCase):
     "set DEVCORE_RUN_POSTGRES_INTEGRATION=1 to run disposable PostgreSQL integration checks",
 )
 class PostgresIntegrationTests(unittest.TestCase):
-    image = "postgres:18.6-alpine"
+    image = os.environ.get("DEVCORE_POSTGRES_TEST_IMAGE", "postgres:18.6-alpine")
 
     def setUp(self):
         if not shutil.which("docker"):
@@ -280,6 +280,73 @@ class PostgresIntegrationTests(unittest.TestCase):
             input_text=password + "\n",
             check=False,
         )
+
+    @unittest.skipUnless(os.environ.get("DEVCORE_POSTGRES_TEST_IMAGE"), "requires candidate image")
+    def test_vector_activation_retry_and_declaration_removal(self):
+        config = self.project / ".devcore/project.conf"
+        original = config.read_text()
+        config.write_text(original + "\nPG_EXTENSIONS=unknown\n")
+        self._tool("activate", expected=1)
+        config.write_text(original)
+        self._tool("activate")
+        test_sql = ["docker", "exec", self.container_names[1], "psql", "-XqAt",
+                    "-v", "ON_ERROR_STOP=1", "-U", "integration_test", "-d", "integration_test"]
+        self._run(test_sql + ["-c", "CREATE SCHEMA devcore_extensions"])
+
+        config.write_text(original + "\nPG_EXTENSIONS=vector\n")
+        failure = self._tool("activate", expected=1)
+        self.assertIn("partial provisioning: DEV succeeded, TEST vector provisioning failed", failure.stderr)
+        self._run(test_sql + ["-c", "ALTER SCHEMA devcore_extensions RENAME TO app_extensions"])
+
+        self._tool("activate")
+        self._tool("activate")
+        for container, profile in zip(self.container_names, ("dev", "test")):
+            role = "integration_" + profile
+            command = ["docker", "exec", container, "psql", "-XqAt",
+                       "-v", "ON_ERROR_STOP=1", "-U", role, "-d", role]
+            result = self._run(command + ["-c",
+                'CREATE EXTENSION IF NOT EXISTS "vector"; '
+                "CREATE TABLE embeddings (value vector(2)); "
+                "INSERT INTO embeddings VALUES ('[1,0]'); "
+                "SELECT value <=> '[0,1]' FROM embeddings"])
+            self.assertEqual(result.stdout.strip(), "1")
+            denied = self._run(command + ["-c",
+                "CREATE TABLE devcore_extensions.forbidden (id int)"], check=False)
+            self.assertIn("permission denied", denied.stderr)
+        self._run(test_sql + ["-c",
+            "ALTER ROLE integration_test IN DATABASE integration_test SET search_path TO public"])
+        failure = self._tool("doctor", expected=1)
+        self.assertIn("TEST PostgreSQL vector search-path or cosine-distance check failed", failure.stderr)
+        self._tool("activate")
+        self._tool("doctor")
+
+        # Simulate catalog drift without changing the built extension library or scripts.
+        admin_sql = ["docker", "exec", self.container_names[1], "psql", "-XqAt",
+                     "-v", "ON_ERROR_STOP=1", "-U", "devcore_admin", "-d", "integration_test"]
+        set_version = "UPDATE pg_catalog.pg_extension SET extversion = '{}' WHERE extname = 'vector'"
+        self._run(admin_sql + ["-c", set_version.format("0.8.6")])
+        self.assertIn("TEST PostgreSQL vector version drift", self._tool("doctor").stderr)
+        self.assertIn("installed=0.8.6", self._tool("activate").stdout)
+
+        self._run(admin_sql + ["-c", set_version.format("99.0")])
+        failure = self._tool("doctor", expected=1)
+        self.assertIn("TEST PostgreSQL installed vector version 99.0 is unsupported", failure.stderr)
+        self._run(admin_sql + ["-c", set_version.format("0.8.7")])
+
+        ash_project = os.environ.get("DEVCORE_ASH_FIXTURE_PROJECT")
+        if ash_project:
+            fixture = ROOT / "tests" / "fixtures" / "ash_vector.exs"
+            result = self._tool(
+                "run", "test", "--", "bash", "-c",
+                'cd "$1" && MIX_ENV=test DEVCORE_ASH_FIXTURE_DIR="$2" '
+                'mix run --no-start --no-compile --no-deps-check "$3"',
+                "ash-vector-rehearsal", ash_project, str(self.root), str(fixture),
+            )
+            self.assertIn("Ash-generated migration and Postgrex vector/cosine round trip passed", result.stdout)
+
+        config.write_text(original)
+        result = self._tool("doctor")
+        self.assertEqual(result.stdout.count("vector: available=0.8.7 installed=0.8.7"), 2)
 
     def test_activate_rotate_and_detect_database_and_render_drift(self):
         secrets_file = self.central / "project-db.env"

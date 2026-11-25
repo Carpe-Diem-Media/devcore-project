@@ -118,3 +118,35 @@ Repository-owned releases preserve existing v1 project files and the existing ow
 `SLOT_POOL` is an optional path to the exact NewYou JSON declaration in [managed slots](managed-slots.md). When declared, it routes `run dev` and `run test` through managed allocation and requires prior owner authorization. Managed mode rejects `run all` before acquisition; it never falls back to shared TEST. Projects without the declaration retain all legacy profiles. `plan`, `doctor`, `render`, `activate` and `rotate` retain their legacy meanings; none is a slot activation or generic recovery command. In particular, do not invoke legacy `activate` to repair a missing managed generation.
 
 The extension keeps the canonical secret store, owner declarations and render tokens. Managed runs supply a private per-command shadow TEST binding to the existing renderer and load its temporary outputs without rewriting worktree files. Snapshots are removed immediately after loading. Production is outside this tool's slot contract. See the [NewYou integration contract](newyou-integration-contract.md) for markers, live verification, migration and child-process obligations.
+
+## PostgreSQL extension requirements
+
+Set `PG_EXTENSIONS=vector` to request pgvector in the configured DEV and
+TEST base databases. Omit the key or leave it empty for projects that do
+not need it. The fixed allowlist currently contains only `vector`.
+
+Activation checks both servers for pgvector 0.8.7 before database
+provisioning. It installs the extension as the workstation admin in
+`devcore_extensions` and grants the project owner schema usage. For this
+opt-in, DevCore sets the owner's database-specific search path to
+`"$user", public, devcore_extensions`. Keep the extension schema on any
+application-supplied search path. PostgreSQL keeps control of implicit
+catalog lookup.
+
+If TEST provisioning fails after DEV succeeds, retry activation after
+correcting the reported error. Activation verifies the installed extension
+and does not move, drop, or upgrade it. Removing the declaration retains
+the installed extension and its search-path configuration. Doctor reports
+available and installed versions, warns about supported version drift,
+and rejects an installed version with neither an install script nor a
+shipped upgrade path to the server's default version.
+For a declared vector requirement, doctor also opens a fresh project-role
+connection to check unqualified type and cosine-distance resolution.
+These PostgreSQL checks are read-only.
+
+Applications configure their driver types and own column and index
+migrations. Independently created test databases and managed slots do
+not inherit extensions from the project's base databases. DevCore rejects
+a nonempty `PG_EXTENSIONS` alongside `SLOT_POOL`. Use a fresh
+disposable PostgreSQL pair provisioned through activation when rehearsing
+vector migrations.

@@ -728,6 +728,13 @@ class DevCoreBaselineTests(DevCoreProjectFixture):
         for value in (DEV_PASSWORD, TEST_PASSWORD):
             self.assertNotIn(value, result.stdout + result.stderr)
 
+    def test_plan_rejects_extensions_with_managed_slots(self):
+        with (self.project / ".devcore/project.conf").open("a") as config:
+            config.write("\nPG_EXTENSIONS=vector\nSLOT_POOL=.devcore/slots.json\n")
+        result = self.run_tool("plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PG_EXTENSIONS is unsupported with SLOT_POOL", result.stderr)
+
     def test_duplicate_config_keys_use_first_value_in_plan_render_doctor_and_run(self):
         self._start_database_endpoints()
         dev_port = next(
