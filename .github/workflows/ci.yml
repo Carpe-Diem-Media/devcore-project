@@ -59,6 +59,8 @@ jobs:
           DEVCORE_RUN_POSTGRES_INTEGRATION: "1"
           DEVCORE_POSTGRES_TEST_IMAGE: devcore-postgres:18.7-vector0.8.7
         run: python3 -m unittest tests.test_postgres_integration -v
+      - name: Verify PostgreSQL backup and recovery
+        run: bash tests/rehearse_postgres_recovery.sh
       - name: Remove integration containers
         if: always()
         run: |

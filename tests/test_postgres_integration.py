@@ -313,6 +313,26 @@ class PostgresIntegrationTests(unittest.TestCase):
             denied = self._run(command + ["-c",
                 "CREATE TABLE devcore_extensions.forbidden (id int)"], check=False)
             self.assertIn("permission denied", denied.stderr)
+        self._run(test_sql + ["-c",
+            "ALTER ROLE integration_test IN DATABASE integration_test SET search_path TO public"])
+        failure = self._tool("doctor", expected=1)
+        self.assertIn("TEST PostgreSQL vector search-path or cosine-distance check failed", failure.stderr)
+        self._tool("activate")
+        self._tool("doctor")
+
+        # Simulate catalog drift without changing the built extension library or scripts.
+        admin_sql = ["docker", "exec", self.container_names[1], "psql", "-XqAt",
+                     "-v", "ON_ERROR_STOP=1", "-U", "devcore_admin", "-d", "integration_test"]
+        set_version = "UPDATE pg_catalog.pg_extension SET extversion = '{}' WHERE extname = 'vector'"
+        self._run(admin_sql + ["-c", set_version.format("0.8.6")])
+        self.assertIn("TEST PostgreSQL vector version drift", self._tool("doctor").stderr)
+        self.assertIn("installed=0.8.6", self._tool("activate").stdout)
+
+        self._run(admin_sql + ["-c", set_version.format("99.0")])
+        failure = self._tool("doctor", expected=1)
+        self.assertIn("TEST PostgreSQL installed vector version 99.0 is unsupported", failure.stderr)
+        self._run(admin_sql + ["-c", set_version.format("0.8.7")])
+
         ash_project = os.environ.get("DEVCORE_ASH_FIXTURE_PROJECT")
         if ash_project:
             fixture = ROOT / "tests" / "fixtures" / "ash_vector.exs"

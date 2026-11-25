@@ -137,10 +137,16 @@ If TEST provisioning fails after DEV succeeds, retry activation after
 correcting the reported error. Activation verifies the installed extension
 and does not move, drop, or upgrade it. Removing the declaration retains
 the installed extension and its search-path configuration. Doctor reports
-available and installed versions without changing PostgreSQL state.
+available and installed versions, warns about supported version drift,
+and rejects an installed version with neither an install script nor a
+shipped upgrade path to the server's default version.
+For a declared vector requirement, doctor also opens a fresh project-role
+connection to check unqualified type and cosine-distance resolution.
+These PostgreSQL checks are read-only.
 
 Applications configure their driver types and own column and index
 migrations. Independently created test databases and managed slots do
-not inherit extensions from the project's base databases. Use a fresh
+not inherit extensions from the project's base databases. DevCore rejects
+a nonempty `PG_EXTENSIONS` alongside `SLOT_POOL`. Use a fresh
 disposable PostgreSQL pair provisioned through activation when rehearsing
 vector migrations.

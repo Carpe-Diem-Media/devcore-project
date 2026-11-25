@@ -513,6 +513,7 @@ validate_secret_value() {
 
 validate_project() {
   [[ -z "$PG_EXTENSIONS" || "$PG_EXTENSIONS" == vector ]] || die "PG_EXTENSIONS must be empty or vector"
+  [[ -z "$PG_EXTENSIONS" || -z "$SLOT_POOL" ]] || die "PG_EXTENSIONS is unsupported with SLOT_POOL"
   [[ "$PROJECT_KEY" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "invalid PROJECT_KEY: $PROJECT_KEY"
   validate_identifier DEV_DB_ROLE "$DEV_DB_ROLE"
   validate_identifier DEV_DB_NAME "$DEV_DB_NAME"
@@ -671,8 +672,11 @@ GRANT USAGE ON SCHEMA devcore_extensions TO :"role";
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA devcore_extensions VERSION '0.8.7';
 SELECT n.nspname = 'devcore_extensions'
        AND pg_get_userbyid(e.extowner) = current_user
-       AND EXISTS (SELECT FROM pg_available_extension_versions AS v
-                   WHERE v.name = e.extname AND v.version = e.extversion) AS valid_extension
+       AND (EXISTS (SELECT FROM pg_available_extension_versions AS v
+                    WHERE v.name = e.extname AND v.version = e.extversion)
+            OR EXISTS (SELECT FROM pg_extension_update_paths('vector') AS u
+                       WHERE u.source = e.extversion AND u.target = '0.8.7'
+                         AND u.path IS NOT NULL)) AS valid_extension
 FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace
 WHERE e.extname = 'vector'
 \gset
@@ -860,6 +864,18 @@ with socket.create_connection((host,port),timeout=2):
   pass "$label endpoint reachable: $host:$port"
 }
 
+postgres_doctor_query() {
+  local container="$1" role="$2" db="$3" host="$4" port="$5" password="$6" query="$7"
+  local -a args=(-X -qAt -U "$role" -d "$db" -v ON_ERROR_STOP=1 -F '|' -c "$query")
+  if command -v psql >/dev/null 2>&1; then
+    PGPASSWORD="$password" psql -h "$host" -p "$port" "${args[@]}"
+  else
+    printf '%s\n' "$password" | docker exec -i "$container" \
+      sh -c 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql "$@"' \
+      devcore-psql -h 127.0.0.1 "${args[@]}"
+  fi
+}
+
 db_doctor() {
   local label="$1" container="$2" role="$3" db="$4" secret_key="$5" host="$6" port="$7" allow_createdb="$8"
   container_running "$container" || die "$label PostgreSQL container unavailable: $container"
@@ -891,21 +907,20 @@ SELECT names.name, coalesce(a.default_version, 'unavailable'),
          AND NOT EXISTS (
            SELECT FROM aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) AS acl
            WHERE acl.privilege_type = 'CREATE' AND acl.grantee <> n.nspowner
-         ) AND pg_get_userbyid(n.nspowner) = pg_get_userbyid(e.extowner), false)
+         ) AND pg_get_userbyid(n.nspowner) = pg_get_userbyid(e.extowner), false),
+       CASE WHEN names.name = 'vector' AND a.name IS NOT NULL AND e.extversion IS NOT NULL
+            THEN EXISTS (SELECT FROM pg_available_extension_versions AS v
+                         WHERE v.name = e.extname AND v.version = e.extversion)
+                 OR EXISTS (SELECT FROM pg_extension_update_paths('vector') AS u
+                            WHERE u.source = e.extversion AND u.target = a.default_version
+                              AND u.path IS NOT NULL)
+            ELSE false END
 FROM (VALUES ('vector'), ('pg_trgm'), ('pgcrypto'), ('citext'), ('btree_gist'), ('unaccent')) AS names(name)
 LEFT JOIN pg_available_extensions AS a USING (name)
 LEFT JOIN pg_extension AS e ON e.extname = names.name
 LEFT JOIN pg_namespace AS n ON n.oid = e.extnamespace
 ORDER BY names.name;"
-  if command -v psql >/dev/null 2>&1; then
-    result="$(PGPASSWORD="$password" psql -X -qAt -h "$host" -p "$port" -U "$role" -d "$db" \
-      -v ON_ERROR_STOP=1 -F '|' -c "$query")"
-  else
-    result="$(printf '%s\n' "$password" | docker exec -i "$container" \
-      sh -c 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec psql "$@"' \
-      devcore-psql -X -qAt -h 127.0.0.1 -U "$role" -d "$db" \
-      -v ON_ERROR_STOP=1 -F '|' -c "$query")"
-  fi
+  result="$(postgres_doctor_query "$container" "$role" "$db" "$host" "$port" "$password" "$query")"
   local -a fields
   IFS='|' read -r -a fields <<< "$result"
   [[ "${#fields[@]}" -eq 11 && "${fields[2]}" =~ ^[0-9]+$ ]] || \
@@ -919,8 +934,8 @@ ORDER BY names.name;"
      "${fields[9]}" == "f" && "${fields[10]}" == "0" ]] || \
     die "$label PostgreSQL role, ownership, or membership invariant failed"
   pass "$label PostgreSQL authentication: $role / $db (server version ${fields[2]})"
-  local extension available installed schema owner protected vector_verified=no
-  while IFS='|' read -r extension available installed schema owner protected; do
+  local extension available installed schema owner protected supported vector_verified=no
+  while IFS='|' read -r extension available installed schema owner protected supported; do
     [[ -n "$extension" ]] || continue
     printf '%s PostgreSQL extension %s: available=%s installed=%s\n' \
       "$label" "$extension" "$available" "$installed"
@@ -928,6 +943,7 @@ ORDER BY names.name;"
       [[ "$available" != unavailable && "$installed" != "not installed" &&
          "$schema" == devcore_extensions && "$owner" == "$PG_ADMIN_ROLE" && "$protected" == t ]] ||
         die "$label PostgreSQL vector availability, installation, schema or ownership check failed"
+      [[ "$supported" == t ]] || die "$label PostgreSQL installed vector version $installed is unsupported by the server image"
       vector_verified=yes
       if [[ "$available" != "$installed" ]]; then
         printf '%s PostgreSQL vector version drift: available=%s installed=%s\n' "$label" "$available" "$installed" >&2
@@ -936,6 +952,19 @@ ORDER BY names.name;"
   done <<< "$(sed '1d' <<< "$result")"
   [[ "$PG_EXTENSIONS" != vector || "$vector_verified" == yes ]] ||
     die "$label PostgreSQL vector diagnostic result missing"
+  if [[ "$PG_EXTENSIONS" == vector ]]; then
+    local vector_query="BEGIN READ ONLY;
+    SELECT coalesce(
+      'devcore_extensions' = ANY(pg_catalog.current_schemas(false))
+      AND pg_catalog.to_regtype('vector') = 'devcore_extensions.vector'::pg_catalog.regtype
+      AND pg_catalog.to_regoperator('<=> (vector, vector)') =
+          'devcore_extensions.<=> (devcore_extensions.vector, devcore_extensions.vector)'::pg_catalog.regoperator
+      AND ('[1,0]'::vector <=> '[0,1]'::vector) = 1, false);
+    ROLLBACK;"
+    result="$(postgres_doctor_query "$container" "$role" "$db" "$host" "$port" "$password" "$vector_query")" &&
+      [[ "$result" == t ]] ||
+      die "$label PostgreSQL vector search-path or cosine-distance check failed"
+  fi
 }
 
 redis_doctor() {
@@ -2319,6 +2348,8 @@ class SlotContext:
         self.secret_file = str(private_path(secret_file).resolve())
         self.central = private_path(central, directory=True)
         self.project = parse_pairs(self.project_file)
+        if self.project.get("PG_EXTENSIONS") and self.project.get("SLOT_POOL"):
+            raise SlotError("PG_EXTENSIONS is unsupported with SLOT_POOL")
         self.global_config = parse_pairs(self.global_file)
         required = {"PROJECT_KEY": "new_you", "DEV_DB_ROLE": "new_you_dev", "DEV_DB_NAME": "new_you_dev",
                     "TEST_DB_ROLE": "new_you_test", "TEST_DB_NAME": "new_you_test",
